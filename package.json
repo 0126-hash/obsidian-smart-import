@@ -1,0 +1,17 @@
+{
+  "name": "obsidian-smart-import",
+  "version": "0.1.0",
+  "description": "Desktop-only Smart Import plugin for Obsidian.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "version:bump": "node scripts/version-bump.mjs",
+    "validate": "node --check src/main.js && python3 -m py_compile src/ocr_pdf.py",
+    "build": "npm run validate && node scripts/build.mjs",
+    "release:prepare": "npm run build && node scripts/package-release.mjs"
+  },
+  "keywords": ["obsidian", "plugin", "import", "markdown"],
+  "license": "MIT"
+}

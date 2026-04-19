@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "*.*.*"
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prepare release assets
+        run: npm run release:prepare
+
+      - name: Verify tag matches manifest version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          test "${GITHUB_REF_NAME}" = "$(node -p "require('./manifest.json').version")"
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/main.js \
+            dist/manifest.json \
+            dist/styles.css \
+            dist/*.zip \
+            --generate-notes

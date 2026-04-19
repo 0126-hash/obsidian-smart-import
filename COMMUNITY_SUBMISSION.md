@@ -7,6 +7,8 @@ This file collects the exact metadata needed to submit `Smart Import` to the Obs
 - repo: `0126-hash/obsidian-smart-import`
 - branch: `main`
 - manifest path: `/manifest.json`
+- latest public release: `0.2.0`
+- latest release URL: `https://github.com/0126-hash/obsidian-smart-import/releases/tag/0.2.0`
 
 ## Community directory entry
 
@@ -44,3 +46,17 @@ This repo also publishes a zip for manual installation, but Community Plugins on
 - latest GitHub release contains the three standard assets
 - `manifest.json` version matches the Git tag
 - README clearly explains external dependencies and platform limitations
+
+## Submission target
+
+When submitting to `obsidianmd/obsidian-releases`, add this entry to `community-plugins.json`:
+
+```json
+{
+  "id": "smart-import",
+  "name": "Smart Import",
+  "author": "xuziming",
+  "description": "Desktop-only file importer for Obsidian that converts external files into Markdown and stores source assets inside the vault.",
+  "repo": "0126-hash/obsidian-smart-import"
+}
+```

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.4
+
+- fixed a false-positive legacy-layout migration that could rewrite fresh imports after opening them
+- fixed duplicated `Original File` sections by making section replacement collapse duplicate headings into a single canonical block
+- added automatic cleanup for already-imported notes that were previously saved with duplicate `Original File` or `Warnings` sections
+
 ## 0.2.3
 
 - made `markitdown` detection more robust for GUI installs by probing common user-local bin directories before falling back to shell lookup

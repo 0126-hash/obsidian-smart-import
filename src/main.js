@@ -1333,14 +1333,24 @@ function buildImportedFrontmatterFields(context) {
 
 function replaceMarkdownSection(content, heading, nextBody) {
   const text = String(content || "").replace(/\r\n/g, "\n");
-  const sectionPattern = new RegExp(`(^##\\s+${escapeRegExp(heading)}\\s*\\n+)([\\s\\S]*?)(?=\\n##\\s+|$)`, "m");
+  const sectionPattern = new RegExp(`^##\\s+${escapeRegExp(heading)}\\s*\\n+[\\s\\S]*?(?=^##\\s+|$)`, "gm");
   if (nextBody == null || !String(nextBody).trim()) {
     return text.replace(sectionPattern, "").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
   }
 
   const rendered = `## ${heading}\n\n${String(nextBody).trim()}\n`;
   if (sectionPattern.test(text)) {
-    return text.replace(sectionPattern, rendered).replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
+    let replaced = false;
+    return text
+      .replace(sectionPattern, () => {
+        if (replaced) {
+          return "";
+        }
+        replaced = true;
+        return rendered;
+      })
+      .replace(/\n{3,}/g, "\n\n")
+      .trimEnd() + "\n";
   }
   return `${text.replace(/\s+$/, "")}\n\n${rendered}`.replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
 }
@@ -2373,8 +2383,13 @@ function cleanSpreadsheetMarkdown(content) {
 
 function extractLegacyImportedPayload(content) {
   const text = String(content || "");
-  const hasLegacySections = /(?:^|\n)##\s+(Import Warning|Content|Import Result)\s*\n/m.test(text);
-  const hasOldFrontmatter = /^---\n[\s\S]*?\n---\n/.test(text) && hasLegacySections;
+  const frontmatterMatch = text.match(/^---\n([\s\S]*?)\n---\n*/);
+  const frontmatter = frontmatterMatch ? frontmatterMatch[1] : "";
+  const hasCurrentImportFrontmatter = /(?:^|\n)(source_file_name|conversion_status|import_record):\s*/.test(frontmatter);
+  const hasLegacyImportWarning = /(?:^|\n)##\s+Import Warning\s*\n/m.test(text);
+  const hasLegacyImportResult = /(?:^|\n)##\s+Import Result\s*\n/m.test(text);
+  const hasLegacyContentOnly = /(?:^|\n)##\s+Content\s*\n/m.test(text) && !hasCurrentImportFrontmatter;
+  const hasOldFrontmatter = Boolean(frontmatterMatch) && (hasLegacyImportWarning || hasLegacyImportResult || hasLegacyContentOnly);
   const hasHtmlHeader = text.includes('<div class="smart-import-note-header">');
   const hasLegacyFence = text.startsWith("```smart-import-note");
   if (!hasOldFrontmatter && !hasHtmlHeader && !hasLegacyFence) {
@@ -2383,7 +2398,7 @@ function extractLegacyImportedPayload(content) {
 
   if (hasOldFrontmatter) {
     const warningMatch = text.match(/## Import Warning\s*\n+([\s\S]*?)(?=\n##\s+|$)/);
-    const contentMatch = text.match(/## Content\s*\n+([\s\S]*)$/);
+    const contentMatch = text.match(/## Content\s*\n+([\s\S]*?)(?=\n##\s+|$)/);
     if (!warningMatch && !contentMatch) {
       return null;
     }
@@ -2406,6 +2421,10 @@ function extractLegacyImportedPayload(content) {
 
 function getDisplayNameFromRecord(record) {
   return record.fileName || record.file_name || record.source_file_original_name || path.basename(record.filePath || record.output_note_path || "") || "未命名文件";
+}
+
+function countMarkdownSectionOccurrences(content, heading) {
+  return (String(content || "").match(new RegExp(`(?:^|\\n)##\\s+${escapeRegExp(heading)}\\s*(?=\\n)`, "g")) || []).length;
 }
 
 function formatImportMethodLabel(importMethod) {
@@ -4965,6 +4984,23 @@ module.exports = class SmartImportPlugin extends Plugin {
     const content = await this.app.vault.cachedRead(file);
     const legacyPayload = extractLegacyImportedPayload(content);
     if (!legacyPayload) {
+      const hasDuplicateOriginalFileSections = countMarkdownSectionOccurrences(content, "Original File") > 1;
+      const hasDuplicateWarningSections = countMarkdownSectionOccurrences(content, "Warnings") > 1;
+      if (!hasDuplicateOriginalFileSections && !hasDuplicateWarningSections) {
+        return;
+      }
+      await this.updateImportedNoteMetadata(file, {
+        sourceFileName: record.source_file_original_name || path.basename(file.path, path.extname(file.path)),
+        sourceFileType: record.source_type || "",
+        sourceFileStoredPath: record.source_file_stored_path || "",
+        sourceFilePath: record.source_file_path || "",
+        importedAt: record.imported_at || "",
+        importMethod: record.import_method || "",
+        status: record.import_status || record.status || "imported_to_inbox",
+        importRecordPath: record.import_record_path || "",
+        converterName: record.converter_name || "markitdown",
+        warning: record.warning || ""
+      });
       return;
     }
 

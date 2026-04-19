@@ -6,12 +6,14 @@ Smart Import processes local files and may also send content to an AI provider w
 
 - reads files outside the vault that you explicitly choose to import
 - may inspect clipboard content and clipboard file paths
+- may inspect Finder current selection on macOS when you invoke that import mode
+- may search local folders such as `~/Downloads` and `~/Desktop` when you use natural-language import
 - stores imported source files inside the vault
 - writes internal import records under `.openclaw/`
 
 ## External network use
 
-When AI features are enabled, the plugin may send:
+When AI features are enabled and an OpenAI-compatible provider is configured, the plugin may send:
 
 - import record snapshots
 - extracted text

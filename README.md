@@ -13,11 +13,21 @@ The build step copies these sources into release-ready root files.
 
 ## What the plugin does
 
-- imports files from outside the vault
-- converts supported files into Markdown
-- stores imported source files inside the vault
-- supports clipboard and file-picker driven import flows
-- optionally applies AI-based cleanup and suggestions
+- imports files and folders from outside the vault
+- supports file picker, drag-and-drop, recent downloads, Finder selection, clipboard, and natural-language lookup flows
+- converts supported documents into Markdown notes with import frontmatter
+- preserves original source files inside the vault when enabled
+- generates partial stub notes for low-quality PDFs and unsupported files instead of failing silently
+- can extract embedded media assets from Office files when available
+- optionally applies OpenAI-compatible cleanup and suggestion flows, with local rule-based fallback
+
+## Main commands
+
+- `Smart Import: 导入文件`
+- `Smart Import: 导入文件夹`
+- `Smart Import: 导入最近下载`
+- `Smart Import: 导入 Finder 当前选中`
+- `Smart Import: 自然语言导入`
 
 ## Platform support
 
@@ -85,8 +95,9 @@ Copy these files into:
 ## Operational notes
 
 - The plugin copies original source files into the vault.
-- The plugin may read clipboard contents and, on macOS, inspect clipboard file paths.
-- When AI features are enabled, note content and import snapshots may be sent to the configured AI provider.
+- The plugin may read clipboard contents and, on macOS, inspect clipboard file paths and Finder selection.
+- Natural-language import searches local folders such as `~/Downloads` and `~/Desktop`, and may also look at Finder selection or clipboard file candidates when the request implies them.
+- When AI features are enabled and an OpenAI-compatible provider is configured, note content and import snapshots may be sent to that provider.
 - Environment diagnostics now distinguish between required and optional dependencies so users can tell whether only advanced OCR or `.doc` import is affected.
 - For community-plugin installs, the OCR helper script is generated on demand by `main.js`, so the standard Obsidian release assets remain sufficient.
 

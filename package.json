@@ -1,6 +1,6 @@
 {
   "name": "obsidian-smart-import",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Desktop-only Smart Import plugin for Obsidian.",
   "type": "module",
   "engines": {
@@ -12,6 +12,11 @@
     "build": "npm run validate && node scripts/build.mjs",
     "release:prepare": "npm run build && node scripts/package-release.mjs"
   },
-  "keywords": ["obsidian", "plugin", "import", "markdown"],
+  "keywords": [
+    "obsidian",
+    "plugin",
+    "import",
+    "markdown"
+  ],
   "license": "MIT"
 }

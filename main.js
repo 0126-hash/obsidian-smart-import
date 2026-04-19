@@ -19,6 +19,7 @@ const os = require("os");
 
 const VIEW_TYPE = "smart-import-inbox-view";
 const SUPPORTED_EXTENSIONS = new Set(["doc", "docx", "xls", "xlsx", "pdf", "pptx", "md", "txt"]);
+const DISCOVERABLE_FALLBACK_EXTENSIONS = new Set(["csv", "rtf", "html", "htm", "odt", "ods", "odp", "ppt", "pptm", "docm"]);
 const INTERNAL_ROOT_DIR = ".openclaw";
 const INTERNAL_SOURCE_DIR = `${INTERNAL_ROOT_DIR}/source-files`;
 const INTERNAL_RECORDS_DIR = `${INTERNAL_ROOT_DIR}/import-records`;
@@ -145,11 +146,11 @@ if __name__ == "__main__":
 const IMPORTED_NOTE_WIDTH_MODES = ["standard", "wide", "full"];
 
 const STATUS_META = {
-  received: { label: "Received", tone: "neutral" },
-  converting: { label: "Converting", tone: "working" },
-  imported_to_inbox: { label: "In Inbox", tone: "success" },
-  partial_success: { label: "Partial", tone: "warning" },
-  failed: { label: "Failed", tone: "danger" }
+  received: { label: "已接收", tone: "neutral" },
+  converting: { label: "转换中", tone: "working" },
+  imported_to_inbox: { label: "已导入", tone: "success" },
+  partial_success: { label: "部分成功", tone: "warning" },
+  failed: { label: "失败", tone: "danger" }
 };
 
 function showProgressNotice(existingNotice, message, timeout = 0) {
@@ -748,6 +749,106 @@ async function collectImportablePaths(filePaths, options = {}) {
   return uniqueStrings(importable);
 }
 
+async function listAllFilesRecursive(directoryPath, options = {}) {
+  const maxDepth = Number.isInteger(options.maxDepth) ? options.maxDepth : 3;
+  const maxFiles = Number.isInteger(options.maxFiles) ? options.maxFiles : 100;
+  const pending = [{ directoryPath, depth: 0 }];
+  const discovered = [];
+
+  while (pending.length && discovered.length < maxFiles) {
+    const current = pending.shift();
+    let entries = [];
+    try {
+      entries = await fs.readdir(current.directoryPath, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      const fullPath = path.join(current.directoryPath, entry.name);
+      if (entry.isDirectory()) {
+        if (current.depth < maxDepth) {
+          pending.push({ directoryPath: fullPath, depth: current.depth + 1 });
+        }
+        continue;
+      }
+      if (entry.isFile()) {
+        discovered.push(fullPath);
+        if (discovered.length >= maxFiles) {
+          break;
+        }
+      }
+    }
+  }
+
+  return discovered;
+}
+
+async function collectDiscoveredFileEntries(filePaths, options = {}) {
+  const maxDepth = Number.isInteger(options.maxDepth) ? options.maxDepth : 3;
+  const maxFilesPerDirectory = Number.isInteger(options.maxFilesPerDirectory) ? options.maxFilesPerDirectory : 100;
+  const discovered = [];
+
+  for (const rawPath of uniqueStrings(filePaths)) {
+    const filePath = normalizePossibleFilePath(rawPath);
+    if (!filePath) {
+      continue;
+    }
+
+    let stats = null;
+    try {
+      stats = await fs.stat(filePath);
+    } catch {
+      continue;
+    }
+
+    if (stats.isDirectory()) {
+      const nestedPaths = await listAllFilesRecursive(filePath, {
+        maxDepth,
+        maxFiles: maxFilesPerDirectory
+      });
+      nestedPaths.forEach((nestedPath) => {
+        const baseName = path.basename(nestedPath);
+        const extension = path.extname(nestedPath).slice(1).toLowerCase();
+        if (baseName.startsWith(".")) {
+          return;
+        }
+        if (!SUPPORTED_EXTENSIONS.has(extension) && !DISCOVERABLE_FALLBACK_EXTENSIONS.has(extension)) {
+          return;
+        }
+        discovered.push({
+          path: nestedPath,
+          extension,
+          supported: SUPPORTED_EXTENSIONS.has(extension)
+        });
+      });
+      continue;
+    }
+
+    if (stats.isFile()) {
+      if (path.basename(filePath).startsWith(".")) {
+        continue;
+      }
+      const extension = path.extname(filePath).slice(1).toLowerCase();
+      discovered.push({
+        path: filePath,
+        extension,
+        supported: SUPPORTED_EXTENSIONS.has(extension)
+      });
+    }
+  }
+
+  const seen = new Set();
+  return discovered.filter((entry) => {
+    const normalized = normalizePossibleFilePath(entry.path);
+    if (!normalized || seen.has(normalized)) {
+      return false;
+    }
+    seen.add(normalized);
+    return true;
+  });
+}
+
 async function collectExistingLocalPaths(filePaths) {
   const existing = [];
 
@@ -804,10 +905,11 @@ async function getDroppedPaths(dataTransfer) {
     paths.push(...extractPathsFromText(dataTransfer.getData("text/plain")));
   }
 
-  return collectImportablePaths(paths, {
+  const discovered = await collectDiscoveredFileEntries(paths, {
     maxDepth: 4,
     maxFilesPerDirectory: 100
   });
+  return discovered.map((entry) => entry.path);
 }
 
 function looksLikeClipboardFileName(rawValue) {
@@ -1007,23 +1109,164 @@ async function getUniqueVaultPath(app, desiredPath, options = {}) {
   return attempt;
 }
 
+const IMPORT_FRONTMATTER_ORDER = [
+  "source_file_name",
+  "source_type",
+  "imported_at",
+  "import_method",
+  "conversion_status",
+  "original_file",
+  "import_record",
+  "converter_name"
+];
+
+function mapImportStatusToConversionStatus(status) {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (normalized === "partial_success") {
+    return "partial";
+  }
+  if (normalized === "failed") {
+    return "failed";
+  }
+  return "success";
+}
+
+function splitFrontmatter(content) {
+  const text = String(content || "").replace(/\r\n/g, "\n");
+  const match = text.match(/^---\n([\s\S]*?)\n---\n*/);
+  if (!match) {
+    return {
+      frontmatter: "",
+      body: text
+    };
+  }
+
+  return {
+    frontmatter: match[1],
+    body: text.slice(match[0].length)
+  };
+}
+
+function mergeFrontmatterFields(content, nextFields) {
+  const { frontmatter, body } = splitFrontmatter(content);
+  const fieldMap = new Map();
+  const passthrough = [];
+  const lines = frontmatter ? frontmatter.split("\n") : [];
+
+  lines.forEach((line) => {
+    const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+    if (match) {
+      fieldMap.set(match[1], match[2]);
+      return;
+    }
+    if (line.trim()) {
+      passthrough.push(line);
+    }
+  });
+
+  Object.entries(nextFields || {}).forEach(([key, value]) => {
+    if (value == null || value === "") {
+      fieldMap.delete(key);
+      return;
+    }
+    fieldMap.set(key, yamlString(value));
+  });
+
+  const rendered = [];
+  IMPORT_FRONTMATTER_ORDER.forEach((key) => {
+    if (fieldMap.has(key)) {
+      rendered.push(`${key}: ${fieldMap.get(key)}`);
+      fieldMap.delete(key);
+    }
+  });
+
+  passthrough.forEach((line) => {
+    rendered.push(line);
+  });
+
+  for (const [key, value] of fieldMap.entries()) {
+    rendered.push(`${key}: ${value}`);
+  }
+
+  return `---\n${rendered.join("\n")}\n---\n\n${body.replace(/^\n+/, "")}`.replace(/\n{3,}/g, "\n\n");
+}
+
+function buildImportedFrontmatterFields(context) {
+  return {
+    source_file_name: context.sourceFileName || "",
+    source_type: context.sourceFileType || "",
+    imported_at: context.importedAt || "",
+    import_method: context.importMethod || "",
+    conversion_status: mapImportStatusToConversionStatus(context.status),
+    original_file: context.sourceFileStoredPath || "",
+    import_record: context.importRecordPath || "",
+    converter_name: context.converterName || ""
+  };
+}
+
+function replaceMarkdownSection(content, heading, nextBody) {
+  const text = String(content || "").replace(/\r\n/g, "\n");
+  const sectionPattern = new RegExp(`(^##\\s+${escapeRegExp(heading)}\\s*\\n+)([\\s\\S]*?)(?=\\n##\\s+|$)`, "m");
+  if (nextBody == null || !String(nextBody).trim()) {
+    return text.replace(sectionPattern, "").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
+  }
+
+  const rendered = `## ${heading}\n\n${String(nextBody).trim()}\n`;
+  if (sectionPattern.test(text)) {
+    return text.replace(sectionPattern, rendered).replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
+  }
+  return `${text.replace(/\s+$/, "")}\n\n${rendered}`.replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
+}
+
+function buildOriginalFileSectionContent(context) {
+  if (context.sourceFileStoredPath) {
+    return `- Vault 原件：\`${context.sourceFileStoredPath}\``;
+  }
+  if (context.sourceFilePath && !String(context.sourceFilePath).startsWith("clipboard://")) {
+    return `- 外部原件：\`${context.sourceFilePath}\``;
+  }
+  return "";
+}
+
+function buildWarningSectionContent(context) {
+  const warnings = uniqueStrings([
+    context.warning || "",
+    context.manualNextStep || ""
+  ]);
+  return warnings.join("\n- ").trim() ? `- ${warnings.join("\n- ")}` : "";
+}
+
 function buildMarkdownDocument(context) {
   const cleanedContent = cleanImportedContent(context.content, context.title, context.sourceFileName);
   const body = [];
+  const title = cleanDisplayName(context.title || path.basename(context.outputNotePath || "", path.extname(context.outputNotePath || "")) || "导入文件");
+  const importedAtText = formatImportedAtLine(context.importedAt);
+  const warningSection = buildWarningSectionContent(context);
+  const originalFileSection = buildOriginalFileSectionContent(context);
 
-  if (context.warning) {
-    body.push(`> ${context.warning}`, "");
-  }
+  body.push(`# ${title}`, "");
+  body.push(`> Imported from \`${context.sourceFileName || "未知来源"}\` on ${importedAtText}.`, "");
 
   if (cleanedContent) {
-    body.push(cleanedContent, "");
+    body.push("## Content", "", cleanedContent.trim(), "");
   }
 
-  if (!body.length) {
+  if (warningSection) {
+    body.push("## Warnings", "", warningSection, "");
+  }
+
+  if (originalFileSection) {
+    body.push("## Original File", "", originalFileSection, "");
+  }
+
+  if (!cleanedContent && !warningSection) {
     body.push("导入后暂未生成可显示的正文内容。", "");
   }
 
-  return `${body.join("\n")}`.trimEnd() + "\n";
+  return mergeFrontmatterFields(
+    `${body.join("\n")}`.trimEnd() + "\n",
+    buildImportedFrontmatterFields(context)
+  );
 }
 
 function isLikelyLowQualityPdfMarkdown(content) {
@@ -1601,7 +1844,8 @@ function normalizeComparableTitle(value) {
 }
 
 function cleanImportedContent(content, title, sourceFileName) {
-  const trimmed = String(content || "").trim();
+  const raw = String(content || "").trim();
+  const trimmed = splitFrontmatter(raw).body.trim();
   if (!trimmed) {
     return "";
   }
@@ -2026,6 +2270,24 @@ function getDisplayNameFromRecord(record) {
   return record.fileName || record.file_name || record.source_file_original_name || path.basename(record.filePath || record.output_note_path || "") || "未命名文件";
 }
 
+function formatImportMethodLabel(importMethod) {
+  const normalized = String(importMethod || "").trim();
+  const mapping = {
+    "file-picker": "选择文件",
+    "drag-drop": "拖拽导入",
+    "recent-downloads": "最近下载",
+    "finder-selection": "Finder 当前选中",
+    "folder-picker": "文件夹导入",
+    "smart-request": "自然语言导入",
+    "retry": "重试导入",
+    "clipboard-paste-text": "剪贴板文本",
+    "clipboard-content-url": "网页内容导入",
+    "paste-content-modal": "粘贴内容导入",
+    "paste-content-modal-file": "粘贴内容文件导入"
+  };
+  return mapping[normalized] || normalized || "导入";
+}
+
 function formatSourceType(sourceType) {
   const normalized = String(sourceType || "").toLowerCase();
   if (normalized === "doc") return "Word";
@@ -2208,6 +2470,43 @@ async function convertLegacyWordToDocx(sourcePath, outputDirectory) {
   }
 
   throw new Error("`.doc` 已执行预转换，但未生成 `.docx` 文件。");
+}
+
+async function extractOfficeMediaAssets(sourcePath, outputDirectory) {
+  const extension = path.extname(String(sourcePath || "")).slice(1).toLowerCase();
+  const mediaRoot = {
+    docx: "word/media/",
+    pptx: "ppt/media/",
+    xlsx: "xl/media/"
+  }[extension];
+  if (!mediaRoot) {
+    return [];
+  }
+
+  const unzipPath = (await findCommandPath("unzip")) || "/usr/bin/unzip";
+  try {
+    const { stdout } = await execFileAsync(unzipPath, ["-Z1", sourcePath]);
+    const entries = String(stdout || "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith(mediaRoot) && !line.endsWith("/"));
+    if (!entries.length) {
+      return [];
+    }
+
+    await fs.mkdir(outputDirectory, { recursive: true });
+    for (const entry of entries) {
+      await execFileAsync(unzipPath, ["-j", "-o", sourcePath, entry, "-d", outputDirectory]);
+    }
+
+    const extracted = await fs.readdir(outputDirectory);
+    return extracted
+      .map((name) => path.join(outputDirectory, name))
+      .filter(Boolean);
+  } catch (error) {
+    console.warn("Failed to extract Office media assets", error);
+    return [];
+  }
 }
 
 function formatImportedAtCompact(value) {
@@ -2404,9 +2703,17 @@ module.exports = class SmartImportPlugin extends Plugin {
 
     this.addCommand({
       id: "import-supported-files",
-      name: "导入支持的文件",
+      name: "导入文件",
       callback: async () => {
         await this.openFilePicker();
+      }
+    });
+
+    this.addCommand({
+      id: "import-folder",
+      name: "导入文件夹",
+      callback: async () => {
+        await this.openFolderPicker();
       }
     });
 
@@ -2415,6 +2722,22 @@ module.exports = class SmartImportPlugin extends Plugin {
       name: "导入最近下载",
       callback: async () => {
         await this.importRecentDownloads();
+      }
+    });
+
+    this.addCommand({
+      id: "import-finder-selection",
+      name: "导入 Finder 当前选中",
+      callback: async () => {
+        await this.importFinderSelection();
+      }
+    });
+
+    this.addCommand({
+      id: "import-from-request",
+      name: "自然语言导入",
+      callback: async () => {
+        await this.openSmartRequestModal();
       }
     });
 
@@ -3004,19 +3327,35 @@ module.exports = class SmartImportPlugin extends Plugin {
   async enhancePdfMarkdown(sourcePath, markdown, tempDir) {
     const cleanedBase = cleanOcrMarkdown(markdown);
     if (!isLikelyLowQualityPdfMarkdown(cleanedBase)) {
-      return cleanedBase;
+      return {
+        content: cleanedBase,
+        status: "imported_to_inbox",
+        warning: "",
+        manualNextStep: ""
+      };
     }
 
     const ocrMarkdown = cleanOcrMarkdown(await this.runPdfOcrFallback(sourcePath, tempDir));
     if (!ocrMarkdown.trim()) {
-      return cleanedBase;
+      return {
+        content: cleanedBase,
+        status: "partial_success",
+        warning: "PDF 文本提取质量较低，未能完成 OCR 补救，请查看原件。",
+        manualNextStep: "建议打开原始 PDF，人工核对正文、表格和关键数字。"
+      };
     }
 
-    if (ocrMarkdown.replace(/\s+/g, "").length > cleanedBase.replace(/\s+/g, "").length * 1.2) {
-      return this.correctOcrMarkdownWithAi(ocrMarkdown);
-    }
+    const correctedMarkdown =
+      ocrMarkdown.replace(/\s+/g, "").length > cleanedBase.replace(/\s+/g, "").length * 1.2
+        ? await this.correctOcrMarkdownWithAi(ocrMarkdown)
+        : ocrMarkdown;
 
-    return cleanedBase;
+    return {
+      content: correctedMarkdown,
+      status: "partial_success",
+      warning: "已使用 OCR 备用链路提取 PDF 文本，建议与原件核对。",
+      manualNextStep: "重点检查表格、金额、时间和专有名词。"
+    };
   }
 
   async openFilePicker() {
@@ -3024,7 +3363,197 @@ module.exports = class SmartImportPlugin extends Plugin {
     if (!paths.length) {
       return;
     }
-    await this.importPaths(paths, "file-picker");
+    await this.openImportReview(paths, "file-picker", {
+      title: "确认导入文件",
+      description: "请确认要导入的文件、保存目录和是否保留原件。"
+    });
+  }
+
+  async openFolderPicker() {
+    const directoryPath = await this.selectDirectory();
+    if (!directoryPath) {
+      return;
+    }
+    await this.openImportReview([directoryPath], "folder-picker", {
+      title: "确认导入文件夹",
+      description: "系统会递归扫描该文件夹中的文件，并在确认后导入。"
+    });
+  }
+
+  async getFinderSelectionPaths() {
+    if (process.platform !== "darwin") {
+      return [];
+    }
+
+    const script = [
+      "try",
+      "tell application \"Finder\"",
+      "set selectedItems to selection as alias list",
+      "end tell",
+      "set outputLines to {}",
+      "repeat with selectedItem in selectedItems",
+      "set end of outputLines to POSIX path of selectedItem",
+      "end repeat",
+      "set AppleScript's text item delimiters to linefeed",
+      "return outputLines as text",
+      "on error",
+      "return \"\"",
+      "end try"
+    ];
+
+    try {
+      const { stdout } = await execFileAsync("/usr/bin/osascript", script.flatMap((line) => ["-e", line]));
+      return uniqueStrings(String(stdout || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
+    } catch (error) {
+      console.warn("Failed to read Finder selection", error);
+      return [];
+    }
+  }
+
+  async importFinderSelection() {
+    const paths = await this.getFinderSelectionPaths();
+    if (!paths.length) {
+      new Notice("没有检测到 Finder 当前选中的文件或文件夹。", 6000);
+      return;
+    }
+
+    await this.openImportReview(paths, "finder-selection", {
+      title: "确认导入 Finder 当前选中项",
+      description: "系统会读取 Finder 当前选中的文件或文件夹，并在确认后导入。"
+    });
+  }
+
+  parseSmartImportRequest(query) {
+    const text = String(query || "").trim();
+    const lowered = text.toLowerCase();
+    const fileTypes = [];
+    if (/(ppt|pptx|slide|slides|汇报|演示|课件)/i.test(text)) fileTypes.push("pptx");
+    if (/(pdf|扫描|发票|合同扫描)/i.test(text)) fileTypes.push("pdf");
+    if (/(excel|xlsx|xls|表格|预算|清单)/i.test(text)) fileTypes.push("xlsx", "xls");
+    if (/(word|docx|doc|文档|纪要|方案|说明)/i.test(text)) fileTypes.push("docx", "doc");
+    if (/(txt|文本|纯文本)/i.test(text)) fileTypes.push("txt");
+    if (/(markdown|md|笔记)/i.test(text)) fileTypes.push("md");
+
+    const tokens = uniqueStrings(
+      text
+        .split(/[\s,，。.!?？、/\\|:：;；"'“”‘’()\[\]{}<>《》]+/)
+        .map((item) => item.trim())
+        .filter((item) => item.length >= 2)
+        .filter((item) => !/^(导入|import|文件|文档|那个|一下|今天|最近|刚刚|我|的)$/i.test(item))
+    );
+
+    return {
+      query: text,
+      fileTypes: uniqueStrings(fileTypes),
+      keywords: tokens,
+      preferRecent: /(今天|刚|最近|recent|latest|刚刚)/i.test(text),
+      wantsDownloads: /(下载|downloads?)/i.test(text),
+      wantsDesktop: /(桌面|desktop)/i.test(text),
+      wantsFinder: /(finder|选中|当前选中|当前选择)/i.test(text),
+      wantsClipboard: /(复制|clipboard|剪贴板)/i.test(text)
+    };
+  }
+
+  async searchSmartImportRequest(query) {
+    const parsed = this.parseSmartImportRequest(query);
+    const candidateEntries = [];
+    const rootHints = [];
+    if (parsed.wantsDownloads || !parsed.wantsDesktop) {
+      rootHints.push(path.join(os.homedir(), "Downloads"));
+    }
+    rootHints.push(path.join(os.homedir(), "Desktop"));
+
+    if (parsed.wantsFinder) {
+      const finderSelection = await this.getFinderSelectionPaths();
+      candidateEntries.push(...(await collectDiscoveredFileEntries(finderSelection, {
+        maxDepth: 4,
+        maxFilesPerDirectory: 100
+      })));
+    }
+
+    if (parsed.wantsClipboard) {
+      const clipboardSnapshot = await this.readSystemClipboardSnapshot();
+      candidateEntries.push(...(await collectDiscoveredFileEntries([
+        ...clipboardSnapshot.importablePaths,
+        ...clipboardSnapshot.existingPaths
+      ], {
+        maxDepth: 2,
+        maxFilesPerDirectory: 50
+      })));
+    }
+
+    candidateEntries.push(...(await collectDiscoveredFileEntries(rootHints, {
+      maxDepth: 4,
+      maxFilesPerDirectory: 200
+    })));
+
+    const scored = [];
+    for (const entry of candidateEntries) {
+      const normalizedPath = normalizePossibleFilePath(entry.path);
+      if (!normalizedPath) {
+        continue;
+      }
+
+      let score = 0;
+      if (parsed.fileTypes.length) {
+        if (parsed.fileTypes.includes(entry.extension)) {
+          score += 50;
+        } else {
+          score -= 10;
+        }
+      }
+
+      const comparable = `${path.basename(normalizedPath)} ${normalizedPath}`.toLowerCase();
+      parsed.keywords.forEach((keyword) => {
+        if (comparable.includes(keyword.toLowerCase())) {
+          score += 15;
+        }
+      });
+
+      try {
+        const stats = await fs.stat(normalizedPath);
+        const modifiedAt = getFileActivityTimestamp(stats);
+        if (parsed.preferRecent) {
+          const ageHours = Math.max(0, (Date.now() - modifiedAt) / (1000 * 60 * 60));
+          score += Math.max(0, 24 - ageHours);
+        }
+        scored.push({
+          path: normalizedPath,
+          score,
+          modifiedAt
+        });
+      } catch {
+        continue;
+      }
+    }
+
+    return scored
+      .sort((left, right) => right.score - left.score || right.modifiedAt - left.modifiedAt)
+      .filter((item, index) => item.score > 0 || index < 10)
+      .slice(0, 20)
+      .map((item) => item.path);
+  }
+
+  async openSmartRequestModal() {
+    const modal = new SmartImportRequestModal(this.app, this);
+    modal.open();
+  }
+
+  async openImportReview(paths, importMethod, options = {}) {
+    const discoveredEntries = await collectDiscoveredFileEntries(paths, {
+      maxDepth: 4,
+      maxFilesPerDirectory: 200
+    });
+    if (!discoveredEntries.length) {
+      new Notice("没有识别到可导入的文件。", 6000);
+      return { imported: false, reason: "empty" };
+    }
+
+    return new ImportReviewModal(this.app, this, {
+      ...options,
+      importMethod,
+      entries: discoveredEntries
+    }).openAndImport();
   }
 
   suggestClipboardTitle(text) {
@@ -3064,7 +3593,22 @@ module.exports = class SmartImportPlugin extends Plugin {
     await ensureFolder(this.app, inboxRoot);
     await ensureFolder(this.app, INTERNAL_RECORDS_DIR);
 
-    const file = await this.app.vault.create(outputNotePath, `${content}\n`);
+    const markdown = buildMarkdownDocument({
+      title,
+      sourceFileName: `${title}.md`,
+      sourceFileType: "md",
+      sourceFilePath: "clipboard://text",
+      sourceFileStoredPath: "",
+      importedAt,
+      importMethod,
+      converterName: "clipboard-direct",
+      status: "imported_to_inbox",
+      outputNotePath,
+      outputAssetsPath: "",
+      importRecordPath,
+      content
+    });
+    const file = await this.app.vault.create(outputNotePath, markdown);
     await this.saveImportRecord(importRecordPath, {
       id: jobId,
       sourceFileOriginalName: `${title}.md`,
@@ -3152,12 +3696,10 @@ module.exports = class SmartImportPlugin extends Plugin {
     });
     const importRecordPath = normalizePath(`${INTERNAL_RECORDS_DIR}/${jobId}.json`);
     const contentLines = [
-      `# ${title}`,
-      "",
       `- 来源链接：${normalizedUrl}`,
       `- 来源域名：${hostname}`,
       `- 导入方式：网页内容导入`,
-      `- 导入于：${formatImportedAtLine(importedAt)}`,
+      `- 导入于：${formatImportedAtLine(importedAt)}`
     ];
 
     if (pageImport.title) {
@@ -3184,7 +3726,22 @@ module.exports = class SmartImportPlugin extends Plugin {
     await ensureFolder(this.app, inboxRoot);
     await ensureFolder(this.app, INTERNAL_RECORDS_DIR);
 
-    const file = await this.app.vault.create(outputNotePath, `${content}\n`);
+    const markdown = buildMarkdownDocument({
+      title,
+      sourceFileName: `${title}.md`,
+      sourceFileType: "md",
+      sourceFilePath: normalizedUrl,
+      sourceFileStoredPath: "",
+      importedAt,
+      importMethod,
+      converterName: "clipboard-url",
+      status: "imported_to_inbox",
+      outputNotePath,
+      outputAssetsPath: "",
+      importRecordPath,
+      content
+    });
+    const file = await this.app.vault.create(outputNotePath, markdown);
     await this.saveImportRecord(importRecordPath, {
       id: jobId,
       sourceFileOriginalName: `${title}.md`,
@@ -3372,12 +3929,12 @@ module.exports = class SmartImportPlugin extends Plugin {
       throw new Error("没有可导入的内容。");
     }
 
-    const filePaths = uniqueStrings(extractPathsFromArbitraryText(normalized)).filter((candidate) => {
-      const extension = path.extname(candidate).slice(1).toLowerCase();
-      return SUPPORTED_EXTENSIONS.has(extension);
-    });
+    const filePaths = uniqueStrings(extractPathsFromArbitraryText(normalized));
     if (filePaths.length) {
-      await this.importPaths(filePaths, `${importMethod}-file`);
+      await this.openImportReview(filePaths, `${importMethod}-file`, {
+        title: "确认导入本地文件",
+        description: "已从粘贴内容中识别出本地文件路径，请确认后继续导入。"
+      });
       return { imported: true, mode: "files", paths: filePaths };
     }
 
@@ -3456,14 +4013,14 @@ module.exports = class SmartImportPlugin extends Plugin {
     }
   }
 
-  async importPaths(paths, importMethod) {
+  async importPaths(paths, importMethod, options = {}) {
     if (!Array.isArray(paths) || !paths.length) {
-      return;
+      return { results: [] };
     }
 
     const requiresConverter = paths.some((filePath) => {
       const extension = path.extname(String(filePath || "")).slice(1).toLowerCase();
-      return extension && extension !== "md";
+      return SUPPORTED_EXTENSIONS.has(extension) && extension !== "md" && extension !== "txt";
     });
 
     const environment = requiresConverter
@@ -3478,14 +4035,17 @@ module.exports = class SmartImportPlugin extends Plugin {
       new Notice(`当前无法导入：${environment.detail}`, 8000);
       await this.activateView();
       await this.refreshInboxViews();
-      return;
+      return { results: [] };
     }
 
     let importedCount = 0;
+    let partialCount = 0;
+    let failureCount = 0;
     let firstImportedFile = null;
     let firstImportedPath = "";
     const totalCount = paths.length;
     let progressNotice = null;
+    const results = [];
 
     for (let index = 0; index < paths.length; index += 1) {
       const filePath = paths[index];
@@ -3495,13 +4055,30 @@ module.exports = class SmartImportPlugin extends Plugin {
         0
       );
 
-      const result = await this.importExternalFile(filePath, importMethod);
+      const result = await this.importExternalFile(filePath, importMethod, options);
+      if (result) {
+        results.push({
+          fileName: path.basename(filePath || ""),
+          notePath: result.notePath || "",
+          status: result.status || (result.file ? "imported_to_inbox" : "failed"),
+          warning: result.warning || "",
+          outputAssetsPath: result.outputAssetsPath || ""
+        });
+      }
       if (result && result.file) {
-        importedCount += 1;
+        if (result.status === "imported_to_inbox") {
+          importedCount += 1;
+        }
         if (!firstImportedFile) {
           firstImportedFile = result.file;
           firstImportedPath = result.notePath;
         }
+      }
+      if (result && result.status === "partial_success") {
+        partialCount += 1;
+      }
+      if (!result || result.status === "failed") {
+        failureCount += 1;
       }
     }
 
@@ -3514,12 +4091,18 @@ module.exports = class SmartImportPlugin extends Plugin {
 
     if (firstImportedFile) {
       await this.app.workspace.getLeaf(true).openFile(firstImportedFile);
-      if (totalCount === 1 && importedCount === 1 && firstImportedPath) {
+      if (totalCount === 1 && importedCount === 1 && !partialCount && !failureCount && firstImportedPath) {
         new Notice(`已导入到 ${firstImportedPath}`, 6000);
       } else {
-        new Notice(`已成功导入 ${importedCount} 个文件`, 6000);
+        new Notice(`已处理 ${results.length} 个文件：成功 ${importedCount}，部分成功 ${partialCount}，失败 ${failureCount}`, 6000);
       }
     }
+
+    if (results.length > 1 || partialCount || failureCount) {
+      new ImportResultSummaryModal(this.app, results, { importMethod }).open();
+    }
+
+    return { results };
   }
 
   async importRecentDownloads() {
@@ -3560,7 +4143,10 @@ module.exports = class SmartImportPlugin extends Plugin {
       return;
     }
 
-    await this.importPaths(selections.map((item) => item.path), "recent-downloads");
+    await this.openImportReview(selections.map((item) => item.path), "recent-downloads", {
+      title: "确认导入最近下载",
+      description: "请确认最近下载文件的导入范围和保存位置。"
+    });
   }
 
   async selectFiles() {
@@ -3574,6 +4160,10 @@ module.exports = class SmartImportPlugin extends Plugin {
             {
               name: "Supported Files",
               extensions: Array.from(SUPPORTED_EXTENSIONS)
+            },
+            {
+              name: "All Files",
+              extensions: ["*"]
             }
           ]
         });
@@ -3595,7 +4185,6 @@ module.exports = class SmartImportPlugin extends Plugin {
     return new Promise((resolve) => {
       const input = document.createElement("input");
       input.type = "file";
-      input.accept = ".doc,.docx,.xls,.xlsx,.pdf,.pptx,.md,.txt";
       input.multiple = true;
       input.style.display = "none";
       let settled = false;
@@ -3645,6 +4234,23 @@ module.exports = class SmartImportPlugin extends Plugin {
     });
   }
 
+  async selectDirectory() {
+    const { dialog } = await getElectronModules();
+    if (!dialog || typeof dialog.showOpenDialog !== "function") {
+      throw new Error("当前环境无法打开系统文件夹选择器。");
+    }
+
+    const result = await dialog.showOpenDialog({
+      title: "选择文件夹",
+      properties: ["openDirectory"]
+    });
+
+    if (!result.canceled && Array.isArray(result.filePaths) && result.filePaths.length) {
+      return result.filePaths[0];
+    }
+    return "";
+  }
+
   async listImportRecords(options = {}) {
     const recordsDir = this.getAbsoluteVaultPath(INTERNAL_RECORDS_DIR);
     if (!(await pathExists(recordsDir))) {
@@ -3678,8 +4284,9 @@ module.exports = class SmartImportPlugin extends Plugin {
     });
 
     if (this.settings.enableAiSuggestions && !options.skipAiHydration) {
+      const hydrationLimit = Number.isInteger(options.hydrationLimit) ? options.hydrationLimit : 10;
       await Promise.all(
-        records.map(async (record) => {
+        records.slice(0, hydrationLimit).map(async (record) => {
           const hasAiData =
             record.ai_summary ||
             record.ai_suggested_folder ||
@@ -3715,7 +4322,10 @@ module.exports = class SmartImportPlugin extends Plugin {
 
   canUseRemoteAiProvider() {
     const config = this.getAiProviderConfig();
-    return config.provider === "openai-compatible" && Boolean(config.model) && Boolean(config.apiKey);
+    return Boolean(this.settings.enableAiSuggestions) &&
+      config.provider === "openai-compatible" &&
+      Boolean(config.model) &&
+      Boolean(config.apiKey);
   }
 
   async correctOcrMarkdownWithAi(markdown) {
@@ -4404,7 +5014,17 @@ module.exports = class SmartImportPlugin extends Plugin {
     const movedFile = this.app.vault.getAbstractFileByPath(nextPath);
     if (movedFile && typeof movedFile.path === "string") {
       await this.updateImportedNoteMetadata(movedFile, {
-        outputNotePath: nextPath
+        outputNotePath: nextPath,
+        sourceFileName: record.source_file_original_name || "",
+        sourceFileType: record.source_type || "",
+        sourceFilePath: record.source_file_path || "",
+        sourceFileStoredPath: record.source_file_stored_path || "",
+        importedAt: record.imported_at || "",
+        importMethod: record.import_method || "",
+        converterName: record.converter_name || "",
+        status: record.import_status || record.status || "imported_to_inbox",
+        importRecordPath: record.import_record_path || "",
+        warning: record.warning || ""
       });
     }
 
@@ -4458,23 +5078,52 @@ module.exports = class SmartImportPlugin extends Plugin {
 
   async updateImportedNoteMetadata(file, updates) {
     const content = await this.app.vault.cachedRead(file);
-    if (content) {
-      await this.refreshImportedNoteChrome();
+    if (!content) {
+      return;
     }
+
+    const nextContentBase = mergeFrontmatterFields(content, buildImportedFrontmatterFields({
+      sourceFileName: updates.sourceFileName || path.basename(file.path || "", path.extname(file.path || "")),
+      sourceFileType: updates.sourceFileType || path.extname(file.path || "").slice(1).toLowerCase(),
+      sourceFileStoredPath: updates.sourceFileStoredPath || "",
+      importedAt: updates.importedAt || "",
+      importMethod: updates.importMethod || "",
+      status: updates.status || "imported_to_inbox",
+      importRecordPath: updates.importRecordPath || "",
+      converterName: updates.converterName || ""
+    }));
+    const nextContentWithOriginal = replaceMarkdownSection(
+      nextContentBase,
+      "Original File",
+      buildOriginalFileSectionContent({
+        sourceFileStoredPath: updates.sourceFileStoredPath || "",
+        sourceFilePath: updates.sourceFilePath || ""
+      })
+    );
+    const nextContent = replaceMarkdownSection(
+      nextContentWithOriginal,
+      "Warnings",
+      buildWarningSectionContent({
+        warning: updates.warning || ""
+      })
+    );
+
+    if (nextContent !== content) {
+      await this.app.vault.modify(file, nextContent);
+    }
+    await this.refreshImportedNoteChrome();
   }
 
-  async importExternalFile(sourcePath, importMethod) {
+  async importExternalFile(sourcePath, importMethod, options = {}) {
     const fileName = path.basename(sourcePath);
     const extension = path.extname(fileName).slice(1).toLowerCase();
+    const isSupported = SUPPORTED_EXTENSIONS.has(extension);
     const isDirectMarkdown = extension === "md";
     const isDirectText = extension === "txt";
     const isLegacyWord = extension === "doc";
-    const needsMarkdownConverter = !isDirectMarkdown && !isDirectText;
-
-    if (!SUPPORTED_EXTENSIONS.has(extension)) {
-      new Notice(`暂不支持该文件类型：${fileName}`, 6000);
-      return null;
-    }
+    const needsMarkdownConverter = isSupported && !isDirectMarkdown && !isDirectText;
+    const keepOriginal = options.keepOriginal == null ? Boolean(this.settings.keepOriginal) : Boolean(options.keepOriginal);
+    const inboxRoot = normalizePath(options.outputDir || this.settings.outputDir || DEFAULT_SETTINGS.outputDir);
 
     const environment = !needsMarkdownConverter
       ? {
@@ -4489,19 +5138,14 @@ module.exports = class SmartImportPlugin extends Plugin {
       return null;
     }
 
-    const inboxRoot = normalizePath(this.settings.outputDir || DEFAULT_SETTINGS.outputDir);
     const assetsRoot = normalizePath(`${inboxRoot}/_assets`);
     const title = path.basename(fileName, path.extname(fileName));
     const cleanedTitle = cleanDisplayName(title);
     const noteBaseName = cleanDisplayName(title);
-    const assetSlug = slugify(title) || `import-${createJobId()}`;
     const jobId = createJobId();
     const importRecordPath = normalizePath(`${INTERNAL_RECORDS_DIR}/${jobId}.json`);
     const importedAt = getTimestamp();
     const outputNotePath = await getUniqueVaultPath(this.app, `${inboxRoot}/${noteBaseName}.md`, {
-      separator: " "
-    });
-    const outputAssetsPath = await getUniqueVaultPath(this.app, `${assetsRoot}/${assetSlug}`, {
       separator: " "
     });
     const baseRecord = {
@@ -4510,12 +5154,18 @@ module.exports = class SmartImportPlugin extends Plugin {
       sourceFilePath: sourcePath,
       sourceFileStoredPath: "",
       outputNotePath,
-      outputAssetsPath,
+      outputAssetsPath: "",
       importRecordPath,
       sourceType: extension,
       importedAt,
       importMethod,
-      converterName: isDirectMarkdown ? "direct-copy" : isLegacyWord ? "libreoffice+markitdown" : "markitdown",
+      converterName: !isSupported
+        ? "unsupported-stub"
+        : isDirectMarkdown || isDirectText
+          ? "direct-copy"
+          : isLegacyWord
+            ? "libreoffice+markitdown"
+            : "markitdown",
       converterVersion: environment.version,
       warning: "",
       previewText: "",
@@ -4541,7 +5191,7 @@ module.exports = class SmartImportPlugin extends Plugin {
         status: "received"
       });
 
-      if (this.settings.keepOriginal) {
+      if (keepOriginal) {
         await ensureFolder(this.app, INTERNAL_SOURCE_DIR);
         originalFile = normalizePath(`${INTERNAL_SOURCE_DIR}/${jobId}.${extension}`);
         originalAbsolutePath = this.getAbsoluteVaultPath(originalFile);
@@ -4554,6 +5204,79 @@ module.exports = class SmartImportPlugin extends Plugin {
         status: "converting"
       });
 
+      if (!isSupported) {
+        const unsupportedWarning = `当前暂不支持该文件类型（.${extension || "unknown"}），已保留原件并生成占位笔记。`;
+        const markdown = buildMarkdownDocument({
+          title: cleanedTitle,
+          sourceFileName: fileName,
+          sourceFileType: extension,
+          sourceFilePath: sourcePath,
+          sourceFileStoredPath: originalFile,
+          importedAt,
+          importMethod,
+          converterName: "unsupported-stub",
+          status: "partial_success",
+          outputNotePath,
+          outputAssetsPath: "",
+          importRecordPath,
+          warning: unsupportedWarning,
+          manualNextStep: "建议先转换为 docx、pdf、pptx、xlsx、md 或 txt 后再重试导入。",
+          content: ""
+        });
+        const file = await this.app.vault.create(outputNotePath, markdown);
+        await this.saveImportRecord(importRecordPath, {
+          ...baseRecord,
+          sourceFileStoredPath: originalFile,
+          status: "partial_success",
+          warning: unsupportedWarning
+        });
+        await this.analyzeImportRecord({
+          id: jobId,
+          source_file_original_name: fileName,
+          source_file_path: sourcePath,
+          source_file_stored_path: originalFile,
+          output_note_path: outputNotePath,
+          output_assets_path: "",
+          import_record_path: importRecordPath,
+          source_type: extension,
+          imported_at: importedAt,
+          import_method: importMethod,
+          converter_name: "unsupported-stub",
+          converter_version: "",
+          warning: unsupportedWarning,
+          preview_text: "",
+          import_status: "partial_success",
+          quality_score: null
+        });
+        await this.recordFileActivityEvent({
+          eventType: "file_imported",
+          sourceModule: "import",
+          filePath: outputNotePath,
+          fileName: path.basename(outputNotePath),
+          fileType: extension || inferActivityFileType(outputNotePath),
+          timestamp: importedAt,
+          metadata: {
+            importRecordPath,
+            importStatus: "partial_success",
+            status: "partial_success",
+            canOpen: true,
+            canRelocate: true,
+            enteredAt: importedAt,
+            sourceFilePath: sourcePath,
+            sourceFileStoredPath: originalFile,
+            warning: unsupportedWarning
+          }
+        });
+        return {
+          file,
+          notePath: outputNotePath,
+          originalFile,
+          status: "partial_success",
+          warning: unsupportedWarning,
+          outputAssetsPath: ""
+        };
+      }
+
       if (isLegacyWord) {
         conversionSourcePath = await convertLegacyWordToDocx(sourcePath, tempDir);
       }
@@ -4564,38 +5287,65 @@ module.exports = class SmartImportPlugin extends Plugin {
             await execFileAsync(environment.command, [conversionSourcePath, "-o", tempMarkdownPath]);
             return fs.readFile(tempMarkdownPath, "utf8");
           })();
+      let importStatus = "imported_to_inbox";
+      let warning = "";
+      let manualNextStep = "";
+      let outputAssetsPath = "";
       if (extension === "pdf") {
-        convertedContent = await this.enhancePdfMarkdown(sourcePath, convertedContent, tempDir);
+        const pdfResult = await this.enhancePdfMarkdown(sourcePath, convertedContent, tempDir);
+        convertedContent = pdfResult.content;
+        importStatus = pdfResult.status;
+        warning = pdfResult.warning;
+        manualNextStep = pdfResult.manualNextStep;
       } else if (extension === "xls" || extension === "xlsx") {
         convertedContent = cleanSpreadsheetMarkdown(convertedContent);
       }
+
+      if (["docx", "pptx", "xlsx", "doc"].includes(extension)) {
+        const assetSlug = slugify(title) || `import-${createJobId()}`;
+        const candidateOutputAssetsPath = await getUniqueVaultPath(this.app, `${assetsRoot}/${assetSlug}`, {
+          separator: " "
+        });
+        const candidateAssetsAbsolutePath = this.getAbsoluteVaultPath(candidateOutputAssetsPath);
+        const extractedAssets = await extractOfficeMediaAssets(
+          isLegacyWord ? conversionSourcePath : sourcePath,
+          candidateAssetsAbsolutePath
+        );
+        if (extractedAssets.length) {
+          outputAssetsPath = candidateOutputAssetsPath;
+        } else {
+          await fs.rm(candidateAssetsAbsolutePath, { recursive: true, force: true }).catch(() => {});
+        }
+      }
+
       const previewText = convertedContent.replace(/\s+/g, " ").trim().slice(0, 1200);
 
-      const markdown = isDirectMarkdown
-        ? String(convertedContent || "").replace(/\s+$/, "") + "\n"
-        : buildMarkdownDocument({
-            title: cleanedTitle,
-            sourceFileName: fileName,
-            sourceFileType: extension,
-            sourceFilePath: sourcePath,
-            sourceFileStoredPath: originalFile,
-            importedAt,
-            importMethod,
-            converterName: "markitdown",
-            status: "imported_to_inbox",
-            outputNotePath,
-            outputAssetsPath,
-            importRecordPath,
-            originalFile,
-            content: convertedContent
-          });
+      const markdown = buildMarkdownDocument({
+        title: cleanedTitle,
+        sourceFileName: fileName,
+        sourceFileType: extension,
+        sourceFilePath: sourcePath,
+        sourceFileStoredPath: originalFile,
+        importedAt,
+        importMethod,
+        converterName: isDirectMarkdown || isDirectText ? "direct-copy" : isLegacyWord ? "libreoffice+markitdown" : "markitdown",
+        status: importStatus,
+        outputNotePath,
+        outputAssetsPath,
+        importRecordPath,
+        warning,
+        manualNextStep,
+        content: convertedContent
+      });
 
       const file = await this.app.vault.create(outputNotePath, markdown);
       const savedRecord = {
         ...baseRecord,
         sourceFileStoredPath: originalFile,
+        outputAssetsPath,
         previewText,
-        status: "imported_to_inbox"
+        status: importStatus,
+        warning
       };
       await this.saveImportRecord(importRecordPath, savedRecord);
       await this.analyzeImportRecord({
@@ -4611,9 +5361,9 @@ module.exports = class SmartImportPlugin extends Plugin {
         import_method: importMethod,
         converter_name: isDirectMarkdown || isDirectText ? "direct-copy" : isLegacyWord ? "libreoffice+markitdown" : "markitdown",
         converter_version: environment.version,
-        warning: "",
+        warning,
         preview_text: previewText,
-        import_status: "imported_to_inbox",
+        import_status: importStatus,
         quality_score: null
       });
       await this.recordFileActivityEvent({
@@ -4625,17 +5375,25 @@ module.exports = class SmartImportPlugin extends Plugin {
         timestamp: importedAt,
         metadata: {
           importRecordPath,
-          importStatus: "imported_to_inbox",
-          status: "ready",
+          importStatus: importStatus,
+          status: importStatus === "imported_to_inbox" ? "ready" : importStatus,
           canOpen: true,
           canRelocate: true,
           enteredAt: importedAt,
           sourceFilePath: sourcePath,
-          sourceFileStoredPath: originalFile
+          sourceFileStoredPath: originalFile,
+          warning
         }
       });
 
-      return { file, notePath: outputNotePath, originalFile };
+      return {
+        file,
+        notePath: outputNotePath,
+        originalFile,
+        status: importStatus,
+        warning,
+        outputAssetsPath
+      };
     } catch (error) {
       console.error("Smart import failed", error);
       const detail = (error.stderr || error.message || "Unknown error").trim();
@@ -4650,10 +5408,10 @@ module.exports = class SmartImportPlugin extends Plugin {
         converterName: isDirectMarkdown || isDirectText ? "direct-copy" : isLegacyWord ? "libreoffice+markitdown" : "markitdown",
         status: "failed",
         outputNotePath,
-        outputAssetsPath,
+        outputAssetsPath: "",
         importRecordPath,
-        originalFile,
         warning: isDirectMarkdown || isDirectText ? `Import failed: ${detail}` : `Conversion failed: ${detail}`,
+        manualNextStep: "请检查依赖环境、原文件可读性，或稍后通过“重试”再次导入。",
         content: ""
       });
 
@@ -4677,7 +5435,7 @@ module.exports = class SmartImportPlugin extends Plugin {
         source_file_path: sourcePath,
         source_file_stored_path: originalFile,
         output_note_path: outputNotePath,
-        output_assets_path: outputAssetsPath,
+        output_assets_path: "",
         import_record_path: importRecordPath,
         source_type: extension,
         imported_at: importedAt,
@@ -4710,7 +5468,14 @@ module.exports = class SmartImportPlugin extends Plugin {
         }
       });
       new Notice(`导入失败：${fileName}，${detail}`, 8000);
-      return { file, notePath: outputNotePath, originalFile };
+      return {
+        file,
+        notePath: outputNotePath,
+        originalFile,
+        status: "failed",
+        warning: detail,
+        outputAssetsPath: ""
+      };
     } finally {
       if (tempDir) {
         await fs.rm(tempDir, { recursive: true, force: true });
@@ -4750,15 +5515,9 @@ class PasteContentImportModal extends Modal {
     const snapshotPaths = uniqueStrings([
       ...((this.clipboardSnapshot && this.clipboardSnapshot.importablePaths) || []),
       ...((this.clipboardSnapshot && this.clipboardSnapshot.existingPaths) || [])
-    ]).filter((candidate) => {
-      const extension = path.extname(candidate).slice(1).toLowerCase();
-      return SUPPORTED_EXTENSIONS.has(extension);
-    });
+    ]);
 
-    const directFilePaths = uniqueStrings(extractPathsFromArbitraryText(value)).filter((candidate) => {
-      const extension = path.extname(candidate).slice(1).toLowerCase();
-      return SUPPORTED_EXTENSIONS.has(extension);
-    });
+    const directFilePaths = uniqueStrings(extractPathsFromArbitraryText(value));
     const snapshotMatchedPaths = snapshotPaths.filter((candidate) => {
       const basename = path.basename(candidate);
       return value === basename || value.includes(basename);
@@ -4960,7 +5719,10 @@ class PasteContentImportModal extends Modal {
       this.confirmButton.disabled = true;
       try {
         if (analysis.kind === "file" && Array.isArray(analysis.filePaths) && analysis.filePaths.length) {
-          await this.plugin.importPaths(analysis.filePaths, "paste-content-modal-file");
+          await this.plugin.openImportReview(analysis.filePaths, "paste-content-modal-file", {
+            title: "确认导入本地文件",
+            description: "已从粘贴内容中识别出本地文件，请确认后继续导入。"
+          });
         } else {
           await this.plugin.importPastedContentValue(analysis.rawValue, "paste-content-modal");
         }
@@ -4988,6 +5750,331 @@ class PasteContentImportModal extends Modal {
     if (this.inputEl) {
       this.inputEl.focus();
     }
+  }
+}
+
+class ImportReviewModal extends Modal {
+  constructor(app, plugin, options = {}) {
+    super(app);
+    this.plugin = plugin;
+    this.options = options;
+    this.entries = Array.isArray(options.entries) ? options.entries : [];
+    this.selectedPaths = new Set(this.entries.map((entry) => entry.path).filter(Boolean));
+    this.targetInput = null;
+    this.keepOriginalCheckbox = null;
+    this.onDecision = null;
+  }
+
+  openAndImport() {
+    return new Promise((resolve) => {
+      this.onDecision = resolve;
+      this.open();
+    });
+  }
+
+  finish(result) {
+    if (typeof this.onDecision === "function") {
+      this.onDecision(result);
+      this.onDecision = null;
+    }
+    this.close();
+  }
+
+  onClose() {
+    if (this.onDecision) {
+      this.onDecision({ imported: false, reason: "cancelled" });
+      this.onDecision = null;
+    }
+    this.contentEl.empty();
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("smart-import-modal");
+
+    const sortedEntries = [...this.entries].sort((left, right) => {
+      if (left.supported !== right.supported) {
+        return left.supported ? -1 : 1;
+      }
+      return path.basename(left.path || "").localeCompare(path.basename(right.path || ""), "zh-Hans-CN");
+    });
+    const supportedCount = sortedEntries.filter((entry) => entry.supported).length;
+    const unsupportedCount = sortedEntries.length - supportedCount;
+    const folderOptions = this.plugin.listVisibleFolders();
+
+    contentEl.createEl("h2", { text: this.options.title || "确认导入" });
+    contentEl.createEl("p", {
+      cls: "smart-import-description",
+      text: this.options.description || "确认文件范围、保存目录和原件保留策略后再开始导入。"
+    });
+
+    const summary = contentEl.createDiv({ cls: "smart-import-preview-card" });
+    addInfoRow(summary.createDiv({ cls: "smart-import-modal__info" }), "导入方式", formatImportMethodLabel(this.options.importMethod));
+    addInfoRow(summary.createDiv({ cls: "smart-import-modal__info" }), "识别文件", String(sortedEntries.length));
+    addInfoRow(summary.createDiv({ cls: "smart-import-modal__info" }), "支持格式", String(supportedCount));
+    if (unsupportedCount) {
+      addInfoRow(summary.createDiv({ cls: "smart-import-modal__info" }), "占位导入", `${unsupportedCount} 个`);
+    }
+
+    const locationField = contentEl.createDiv({ cls: "smart-import-modal__field" });
+    locationField.createEl("label", { text: "目标文件夹" });
+    this.targetInput = locationField.createEl("input", {
+      type: "text",
+      value: normalizePath(this.options.outputDir || this.plugin.settings.outputDir || DEFAULT_SETTINGS.outputDir),
+      placeholder: "Inbox"
+    });
+    const folderList = locationField.createEl("datalist", {
+      attr: { id: `smart-import-folders-${Date.now()}` }
+    });
+    folderOptions.forEach((folderPath) => {
+      folderList.createEl("option", { value: folderPath });
+    });
+    this.targetInput.setAttribute("list", folderList.id);
+
+    const keepField = contentEl.createDiv({ cls: "smart-import-modal__field" });
+    const keepWrapper = keepField.createDiv({ cls: "smart-import-info-row" });
+    this.keepOriginalCheckbox = keepWrapper.createEl("input", { type: "checkbox" });
+    this.keepOriginalCheckbox.checked = this.options.keepOriginal == null
+      ? Boolean(this.plugin.settings.keepOriginal)
+      : Boolean(this.options.keepOriginal);
+    keepWrapper.createEl("span", { text: "保留原件到 .openclaw/source-files/" });
+
+    const list = contentEl.createDiv({ cls: "smart-import-recent-list" });
+    sortedEntries.forEach((entry) => {
+      const row = list.createDiv({ cls: "smart-import-recent-item" });
+      const checkbox = row.createEl("input", { type: "checkbox" });
+      checkbox.checked = this.selectedPaths.has(entry.path);
+      const body = row.createDiv({ cls: "smart-import-recent-item__body" });
+      body.createEl("strong", { text: path.basename(entry.path || "") || "未命名文件" });
+      body.createEl("div", {
+        cls: "smart-import-recent-item__meta",
+        text: `${entry.supported ? "支持导入" : "生成占位笔记"} · ${formatSourceType(entry.extension)}`
+      });
+      body.createEl("div", {
+        cls: "smart-import-recent-item__path",
+        text: path.dirname(entry.path || "")
+      });
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) {
+          this.selectedPaths.add(entry.path);
+        } else {
+          this.selectedPaths.delete(entry.path);
+        }
+      });
+    });
+
+    const actions = contentEl.createDiv({ cls: "smart-import-actions" });
+    makeVisibleActionRow(actions);
+    const cancelButton = actions.createEl("button", { text: "取消" });
+    const confirmButton = actions.createEl("button", { text: "确认导入" });
+    cancelButton.classList.add("smart-import-secondary-button");
+    confirmButton.classList.add("smart-import-primary-button");
+    styleActionButton(cancelButton, "secondary");
+    styleActionButton(confirmButton, "primary");
+
+    cancelButton.addEventListener("click", () => {
+      this.finish({ imported: false, reason: "cancelled" });
+    });
+
+    confirmButton.addEventListener("click", async () => {
+      const selectedPaths = sortedEntries
+        .map((entry) => entry.path)
+        .filter((candidate) => this.selectedPaths.has(candidate));
+      if (!selectedPaths.length) {
+        new Notice("请至少勾选一个文件。", 5000);
+        return;
+      }
+
+      const outputDir = normalizePath(String(this.targetInput && this.targetInput.value || "").trim() || DEFAULT_SETTINGS.outputDir);
+      if (
+        !outputDir ||
+        outputDir.startsWith(".") ||
+        outputDir === "Inbox/_assets" ||
+        outputDir.startsWith("Inbox/_assets/")
+      ) {
+        new Notice("请选择一个可见业务目录，不能使用系统目录或资源目录。", 6000);
+        return;
+      }
+      confirmButton.disabled = true;
+      try {
+        const result = await this.plugin.importPaths(selectedPaths, this.options.importMethod, {
+          outputDir,
+          keepOriginal: Boolean(this.keepOriginalCheckbox && this.keepOriginalCheckbox.checked)
+        });
+        this.finish({ imported: true, result });
+      } catch (error) {
+        const message = error && error.message ? error.message : "导入失败。";
+        new Notice(message, 7000);
+      } finally {
+        confirmButton.disabled = false;
+      }
+    });
+  }
+}
+
+class SmartImportRequestModal extends Modal {
+  constructor(app, plugin) {
+    super(app);
+    this.plugin = plugin;
+    this.inputEl = null;
+    this.previewEl = null;
+  }
+
+  renderPreview() {
+    if (!this.previewEl) {
+      return;
+    }
+
+    this.previewEl.empty();
+    const query = String(this.inputEl && this.inputEl.value || "").trim();
+    if (!query) {
+      this.previewEl.createEl("p", {
+        cls: "smart-import-description smart-import-description--subtle",
+        text: "例如：导入我今天下载的预算 ppt，或导入桌面上那个产品说明 pdf。"
+      });
+      return;
+    }
+
+    const parsed = this.plugin.parseSmartImportRequest(query);
+    addInfoRow(this.previewEl.createDiv({ cls: "smart-import-modal__info" }), "关键词", parsed.keywords.join("、") || "未识别");
+    addInfoRow(this.previewEl.createDiv({ cls: "smart-import-modal__info" }), "文件类型", parsed.fileTypes.join("、") || "未限定");
+    addInfoRow(this.previewEl.createDiv({ cls: "smart-import-modal__info" }), "优先最近", parsed.preferRecent ? "是" : "否");
+    addInfoRow(this.previewEl.createDiv({ cls: "smart-import-modal__info" }), "Finder 当前选中", parsed.wantsFinder ? "是" : "否");
+    addInfoRow(this.previewEl.createDiv({ cls: "smart-import-modal__info" }), "剪贴板候选", parsed.wantsClipboard ? "是" : "否");
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("smart-import-modal");
+
+    contentEl.createEl("h2", { text: "自然语言导入" });
+    contentEl.createEl("p", {
+      cls: "smart-import-description",
+      text: "用自然语言描述你想导入的文件，系统会先检索候选，再进入确认导入界面。"
+    });
+
+    const field = contentEl.createDiv({ cls: "smart-import-modal__field" });
+    field.createEl("label", { text: "导入请求" });
+    this.inputEl = field.createEl("textarea", {
+      cls: "smart-import-paste-content-modal__input",
+      attr: {
+        placeholder: "例如：导入我今天下载的预算 ppt"
+      }
+    });
+
+    this.previewEl = contentEl.createDiv({ cls: "smart-import-paste-content-modal__preview" });
+
+    const actions = contentEl.createDiv({ cls: "smart-import-actions" });
+    makeVisibleActionRow(actions);
+    const cancelButton = actions.createEl("button", { text: "取消" });
+    const searchButton = actions.createEl("button", { text: "检索候选" });
+    cancelButton.classList.add("smart-import-secondary-button");
+    searchButton.classList.add("smart-import-primary-button");
+    styleActionButton(cancelButton, "secondary");
+    styleActionButton(searchButton, "primary");
+
+    this.inputEl.addEventListener("input", () => {
+      this.renderPreview();
+    });
+
+    cancelButton.addEventListener("click", () => {
+      this.close();
+    });
+
+    searchButton.addEventListener("click", async () => {
+      const query = String(this.inputEl && this.inputEl.value || "").trim();
+      if (!query) {
+        new Notice("请先输入导入请求。", 5000);
+        return;
+      }
+
+      searchButton.disabled = true;
+      try {
+        const candidates = await this.plugin.searchSmartImportRequest(query);
+        if (!candidates.length) {
+          new Notice("没有找到匹配的本地文件候选。", 6000);
+          return;
+        }
+
+        await this.plugin.openImportReview(candidates, "smart-request", {
+          title: "确认自然语言导入候选",
+          description: `系统已根据“${query}”检索到候选文件，请确认后继续导入。`
+        });
+        this.close();
+      } finally {
+        searchButton.disabled = false;
+      }
+    });
+
+    this.renderPreview();
+    this.inputEl.focus();
+  }
+}
+
+class ImportResultSummaryModal extends Modal {
+  constructor(app, results, options = {}) {
+    super(app);
+    this.results = Array.isArray(results) ? results : [];
+    this.options = options;
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("smart-import-modal");
+
+    const successCount = this.results.filter((item) => item.status === "imported_to_inbox").length;
+    const partialCount = this.results.filter((item) => item.status === "partial_success").length;
+    const failureCount = this.results.filter((item) => item.status === "failed").length;
+
+    contentEl.createEl("h2", { text: "导入结果摘要" });
+    addInfoRow(contentEl.createDiv({ cls: "smart-import-modal__info" }), "导入方式", formatImportMethodLabel(this.options.importMethod));
+    addInfoRow(contentEl.createDiv({ cls: "smart-import-modal__info" }), "成功", String(successCount));
+    addInfoRow(contentEl.createDiv({ cls: "smart-import-modal__info" }), "部分成功", String(partialCount));
+    addInfoRow(contentEl.createDiv({ cls: "smart-import-modal__info" }), "失败", String(failureCount));
+
+    const list = contentEl.createDiv({ cls: "smart-import-recent-list" });
+    this.results.forEach((item) => {
+      const row = list.createDiv({ cls: "smart-import-recent-item" });
+      const body = row.createDiv({ cls: "smart-import-recent-item__body" });
+      const meta = getStatusMeta(item.status || "");
+      body.createEl("strong", { text: item.fileName || path.basename(item.notePath || "") || "未命名文件" });
+      body.createEl("div", {
+        cls: "smart-import-recent-item__meta",
+        text: `状态：${meta.label}`
+      });
+      if (item.notePath) {
+        body.createEl("div", {
+          cls: "smart-import-recent-item__path",
+          text: item.notePath
+        });
+      }
+      if (item.warning) {
+        body.createEl("div", {
+          cls: "smart-import-description smart-import-description--subtle",
+          text: item.warning
+        });
+      }
+    });
+
+    const actions = contentEl.createDiv({ cls: "smart-import-actions" });
+    makeVisibleActionRow(actions);
+    const closeButton = actions.createEl("button", { text: "关闭" });
+    closeButton.classList.add("smart-import-primary-button");
+    styleActionButton(closeButton, "primary");
+    closeButton.addEventListener("click", () => {
+      this.close();
+    });
   }
 }
 
@@ -5041,18 +6128,27 @@ class SmartImportInboxView extends ItemView {
     const actions = container.createDiv({ cls: "smart-import-actions" });
     makeVisibleActionRow(actions);
     const importButton = actions.createEl("button", { text: "选择文件" });
+    const folderButton = actions.createEl("button", { text: "导入文件夹" });
+    const finderButton = actions.createEl("button", { text: "Finder 当前选中" });
     const pasteButton = actions.createEl("button", { text: "粘贴内容" });
     const recentButton = actions.createEl("button", { text: "最近下载" });
+    const requestButton = actions.createEl("button", { text: "自然语言导入" });
     const rebuildButton = actions.createEl("button", { text: "重建活动流" });
     const refreshButton = actions.createEl("button", { text: "刷新" });
     importButton.classList.add("smart-import-primary-button");
+    folderButton.classList.add("smart-import-secondary-button");
+    finderButton.classList.add("smart-import-secondary-button");
     pasteButton.classList.add("smart-import-secondary-button");
     recentButton.classList.add("smart-import-secondary-button");
+    requestButton.classList.add("smart-import-secondary-button");
     rebuildButton.classList.add("smart-import-secondary-button");
     refreshButton.classList.add("smart-import-secondary-button");
     styleActionButton(importButton, "primary");
+    styleActionButton(folderButton, "secondary");
+    styleActionButton(finderButton, "secondary");
     styleActionButton(pasteButton, "secondary");
     styleActionButton(recentButton, "secondary");
+    styleActionButton(requestButton, "secondary");
     styleActionButton(rebuildButton, "secondary");
     styleActionButton(refreshButton, "secondary");
 
@@ -5062,6 +6158,26 @@ class SmartImportInboxView extends ItemView {
         await this.plugin.openFilePicker();
       } finally {
         importButton.disabled = false;
+        await this.refresh();
+      }
+    });
+
+    folderButton.addEventListener("click", async () => {
+      folderButton.disabled = true;
+      try {
+        await this.plugin.openFolderPicker();
+      } finally {
+        folderButton.disabled = false;
+        await this.refresh();
+      }
+    });
+
+    finderButton.addEventListener("click", async () => {
+      finderButton.disabled = true;
+      try {
+        await this.plugin.importFinderSelection();
+      } finally {
+        finderButton.disabled = false;
         await this.refresh();
       }
     });
@@ -5085,6 +6201,15 @@ class SmartImportInboxView extends ItemView {
       }
     });
 
+    requestButton.addEventListener("click", async () => {
+      requestButton.disabled = true;
+      try {
+        await this.plugin.openSmartRequestModal();
+      } finally {
+        requestButton.disabled = false;
+      }
+    });
+
     rebuildButton.addEventListener("click", async () => {
       rebuildButton.disabled = true;
       try {
@@ -5105,7 +6230,7 @@ class SmartImportInboxView extends ItemView {
     const entryGrid = container.createDiv({ cls: "smart-import-entry-grid" });
     const dropzone = entryGrid.createDiv({ cls: "smart-import-dropzone" });
     dropzone.createEl("strong", { text: "拖拽导入" });
-    dropzone.createEl("p", { text: "把 Word、Excel、PDF、PPT、Markdown、TXT 文件拖到这里，直接导入到 Inbox。" });
+    dropzone.createEl("p", { text: "把文件或文件夹拖到这里，系统会先展示导入确认信息，再开始导入。" });
 
     const setDropzoneState = (active) => {
       dropzone.toggleClass("is-active", active);
@@ -5136,7 +6261,10 @@ class SmartImportInboxView extends ItemView {
         return;
       }
 
-      await this.plugin.importPaths(paths, "drag-drop");
+      await this.plugin.openImportReview(paths, "drag-drop", {
+        title: "确认拖拽导入",
+        description: "拖入的文件和文件夹已识别完成，请确认后继续导入。"
+      });
       await this.refresh();
     };
 
@@ -5232,10 +6360,16 @@ class SmartImportInboxView extends ItemView {
       metaLine.setText(`来自 ${getActivitySourceLabel(record.sourceModule)} · ${formatImportedAtCompact(record.enteredAt)}`);
 
       const locationLine = card.createDiv({ cls: "smart-import-card__location" });
-      if (isFailure) {
-        locationLine.setText("状态：失败");
-      } else {
-        locationLine.setText(`位置：${record.locationLabel || getDisplayFolder(record)}`);
+      const importStatus = String(record.metadata && record.metadata.importStatus || record.status || "imported_to_inbox");
+      const statusMeta = getStatusMeta(importStatus);
+      locationLine.setText(`状态：${statusMeta.label} · ${isFailure ? "导入失败" : `位置：${record.locationLabel || getDisplayFolder(record)}`}`);
+
+      const warningText = String(record.metadata && record.metadata.warning || "").trim();
+      if (warningText) {
+        card.createEl("div", {
+          cls: "smart-import-description smart-import-description--subtle",
+          text: warningText
+        });
       }
 
       const actions = card.createDiv({ cls: "smart-import-card__actions" });

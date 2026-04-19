@@ -7,8 +7,8 @@ This file collects the exact metadata needed to submit `Smart Import` to the Obs
 - repo: `0126-hash/obsidian-smart-import`
 - branch: `main`
 - manifest path: `/manifest.json`
-- latest public release: `0.2.0`
-- latest release URL: `https://github.com/0126-hash/obsidian-smart-import/releases/tag/0.2.0`
+- latest public release: `0.2.1`
+- latest release URL: `https://github.com/0126-hash/obsidian-smart-import/releases/tag/0.2.1`
 
 ## Community directory entry
 
@@ -17,7 +17,7 @@ This file collects the exact metadata needed to submit `Smart Import` to the Obs
   "id": "smart-import",
   "name": "Smart Import",
   "author": "xuziming",
-  "description": "Desktop-only file importer for Obsidian that converts external files into Markdown and stores source assets inside the vault.",
+  "description": "Desktop-only file importer that converts external files into Markdown and stores source assets inside the vault.",
   "repo": "0126-hash/obsidian-smart-import"
 }
 ```
@@ -56,7 +56,7 @@ When submitting to `obsidianmd/obsidian-releases`, add this entry to `community-
   "id": "smart-import",
   "name": "Smart Import",
   "author": "xuziming",
-  "description": "Desktop-only file importer for Obsidian that converts external files into Markdown and stores source assets inside the vault.",
+  "description": "Desktop-only file importer that converts external files into Markdown and stores source assets inside the vault.",
   "repo": "0126-hash/obsidian-smart-import"
 }
 ```

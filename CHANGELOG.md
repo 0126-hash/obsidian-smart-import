@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1
+
+- removed `Obsidian` from the plugin description so Community Plugin validation accepts the submission metadata
+- refreshed community submission metadata for the 0.2.1 patch release
+
 ## 0.2.0
 
 - added import frontmatter and explicit stub-note handling for partial or unsupported imports

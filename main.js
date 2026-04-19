@@ -48,7 +48,24 @@ const DEFAULT_SETTINGS = {
   aiProvider: "rules",
   aiProviderBaseUrl: "https://api.openai.com/v1",
   aiProviderModel: "",
-  aiProviderApiKey: ""
+  aiProviderApiKey: "",
+  dependencyWizardLastPromptedVersion: ""
+};
+
+const LOCAL_DEPENDENCY_REQUIREMENTS = {
+  required: [
+    "markitdown：导入 docx、pdf、pptx、xlsx、xls 等需要先转换成 Markdown 的文件时必需。"
+  ],
+  optional: [
+    "python3：PDF OCR 备用链路依赖。",
+    "tesseract：扫描版 PDF 的 OCR 识别依赖。",
+    "pypdfium2：OCR 脚本的 Python 依赖。",
+    "LibreOffice / soffice：导入旧版 .doc 文件时先转成 .docx。"
+  ],
+  notes: [
+    "md、txt 可直接导入，不依赖上述转换工具。",
+    "缺少可选依赖时，只有对应格式或 OCR 能力会受影响。"
+  ]
 };
 
 const EMBEDDED_PDF_OCR_SCRIPT = String.raw`#!/usr/bin/env python3
@@ -1740,6 +1757,17 @@ function escapeRegExp(value) {
   return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function shellQuote(value) {
+  return `'${String(value || "").replace(/'/g, `'\\''`)}'`;
+}
+
+function getPlatformLabel(platform = process.platform) {
+  if (platform === "darwin") return "macOS";
+  if (platform === "win32") return "Windows";
+  if (platform === "linux") return "Linux";
+  return platform || "未知平台";
+}
+
 function formatImportedAt(value) {
   if (!value) {
     return "未知时间";
@@ -2751,10 +2779,25 @@ module.exports = class SmartImportPlugin extends Plugin {
       }
     });
 
+    this.addCommand({
+      id: "open-dependency-install-wizard",
+      name: "打开依赖安装向导",
+      callback: async () => {
+        await this.openDependencyInstallWizard();
+      }
+    });
+
     this.addSettingTab(new SmartImportSettingTab(this.app, this));
     await this.bootstrapActivityStoreFromImportRecords();
     await this.ingestPendingActivityEvents();
     await this.backfillActivityCardsFromVault();
+    this.app.workspace.onLayoutReady(() => {
+      window.setTimeout(() => {
+        this.maybePromptDependencyWizard().catch((error) => {
+          console.warn("Failed to open dependency wizard automatically", error);
+        });
+      }, 1200);
+    });
 
     this.registerDomEvent(window, ACTIVITY_BUS_EVENT, async (event) => {
       if (!event || !event.detail) {
@@ -2834,6 +2877,23 @@ module.exports = class SmartImportPlugin extends Plugin {
 
   async saveSettings() {
     await this.saveData(this.settings);
+  }
+
+  async maybePromptDependencyWizard() {
+    const currentVersion = String(this.manifest && this.manifest.version || "").trim();
+    if (!currentVersion || this.settings.dependencyWizardLastPromptedVersion === currentVersion) {
+      return;
+    }
+
+    const environment = await this.checkEnvironment(true);
+    if (environment.ok) {
+      return;
+    }
+
+    this.settings.dependencyWizardLastPromptedVersion = currentVersion;
+    await this.saveSettings();
+    new Notice("检测到 Smart Import 缺少本地依赖，已自动打开安装向导。", 7000);
+    await this.openDependencyInstallWizard();
   }
 
   async loadActivityStore() {
@@ -3229,6 +3289,200 @@ module.exports = class SmartImportPlugin extends Plugin {
 
     this.environmentStatus = result;
     return result;
+  }
+
+  async buildDependencyInstallPlan(force = false) {
+    const environment = await this.checkEnvironment(force);
+    const platform = process.platform;
+    const platformLabel = getPlatformLabel(platform);
+    const explicitConverterPath = String(this.settings.converterPath || "").trim();
+    const detectedMarkitdownPath = await findCommandPath("markitdown");
+    const hasMarkitdown = Boolean(detectedMarkitdownPath);
+    const hasBrew = platform === "darwin" ? Boolean(await findCommandPath("brew")) : false;
+    const hasPython3 = Boolean(await findCommandPath("python3"));
+    const hasPipx = Boolean(await findCommandPath("pipx"));
+    const hasTesseract = Boolean(await findCommandPath("tesseract"));
+    const hasLibreOffice = Boolean((await findCommandPath("soffice")) || (await findCommandPath("libreoffice")));
+    let hasPypdfium2 = false;
+    if (hasPython3) {
+      try {
+        await execFileAsync("python3", ["-c", "import pypdfium2"]);
+        hasPypdfium2 = true;
+      } catch (error) {
+      }
+    }
+
+    const converterPathInvalid = explicitConverterPath ? !(await pathExists(explicitConverterPath)) : false;
+    const missingItems = [];
+    const notes = [];
+
+    if (!environment.ok && !hasMarkitdown) {
+      missingItems.push({
+        id: "markitdown",
+        label: "markitdown",
+        required: true,
+        detail: "导入 docx、pdf、pptx、xlsx、xls 等需要先转换成 Markdown 的文件时必需。"
+      });
+    }
+    if (!hasPython3) {
+      missingItems.push({
+        id: "python3",
+        label: "python3",
+        required: false,
+        detail: "PDF OCR 备用链路依赖。"
+      });
+    }
+    if (!hasTesseract) {
+      missingItems.push({
+        id: "tesseract",
+        label: "tesseract",
+        required: false,
+        detail: "扫描版 PDF 的 OCR 识别依赖。"
+      });
+    }
+    if (!hasPypdfium2) {
+      missingItems.push({
+        id: "pypdfium2",
+        label: "pypdfium2",
+        required: false,
+        detail: "OCR 脚本的 Python 依赖。"
+      });
+    }
+    if (!hasLibreOffice) {
+      missingItems.push({
+        id: "libreoffice",
+        label: "LibreOffice / soffice",
+        required: false,
+        detail: "导入旧版 .doc 文件时先转成 .docx。"
+      });
+    }
+
+    if (converterPathInvalid) {
+      notes.push("当前“转换器路径”配置指向不存在的文件。你可以清空这个设置，让插件回退到系统 PATH 自动探测。");
+    } else if (!environment.ok && hasMarkitdown) {
+      notes.push("系统已经检测到 markitdown，但当前调用仍失败。请优先检查“转换器路径”设置和 shell PATH。");
+    }
+
+    if (platform !== "darwin") {
+      notes.push("当前版本的半自动安装向导只支持 macOS 自动打开终端执行脚本。其他平台会提供命令复制，但需要你手动执行。");
+    }
+
+    const shellSteps = [];
+    if (platform === "darwin" && missingItems.length) {
+      shellSteps.push("#!/bin/bash");
+      shellSteps.push("set -e");
+      shellSteps.push("echo \"Smart Import 依赖安装向导（macOS）\"");
+      shellSteps.push("echo");
+
+      if (!hasBrew) {
+        shellSteps.push("echo \"未检测到 Homebrew，开始安装…\"");
+        shellSteps.push("/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"");
+        shellSteps.push("if [ -x /opt/homebrew/bin/brew ]; then");
+        shellSteps.push("  eval \"$(/opt/homebrew/bin/brew shellenv)\"");
+        shellSteps.push("elif [ -x /usr/local/bin/brew ]; then");
+        shellSteps.push("  eval \"$(/usr/local/bin/brew shellenv)\"");
+        shellSteps.push("fi");
+      }
+
+      const brewPackages = [];
+      if (!hasPython3) brewPackages.push("python");
+      if (!hasTesseract) brewPackages.push("tesseract");
+      if (!hasLibreOffice) brewPackages.push("libreoffice");
+      if (!hasPipx && missingItems.some((item) => item.id === "markitdown")) {
+        brewPackages.push("pipx");
+      }
+      if (brewPackages.length) {
+        shellSteps.push(`brew install ${uniqueStrings(brewPackages).join(" ")}`);
+      }
+
+      if (missingItems.some((item) => item.id === "markitdown")) {
+        shellSteps.push("if ! command -v pipx >/dev/null 2>&1; then");
+        shellSteps.push("  if command -v brew >/dev/null 2>&1; then");
+        shellSteps.push("    brew install pipx");
+        shellSteps.push("  elif command -v python3 >/dev/null 2>&1; then");
+        shellSteps.push("    python3 -m pip install --user pipx");
+        shellSteps.push("  fi");
+        shellSteps.push("fi");
+        shellSteps.push("if command -v pipx >/dev/null 2>&1; then");
+        shellSteps.push("  pipx ensurepath || true");
+        shellSteps.push("  pipx list | grep -q \"package markitdown\" || pipx install markitdown");
+        shellSteps.push("else");
+        shellSteps.push("  echo \"未能自动安装 pipx，请手动安装 markitdown。\"");
+        shellSteps.push("fi");
+      }
+
+      if (missingItems.some((item) => item.id === "pypdfium2")) {
+        shellSteps.push("if command -v python3 >/dev/null 2>&1; then");
+        shellSteps.push("  python3 -m pip install --user pypdfium2");
+        shellSteps.push("else");
+        shellSteps.push("  echo \"未检测到 python3，跳过 pypdfium2 安装。\"");
+        shellSteps.push("fi");
+      }
+
+      shellSteps.push("echo");
+      shellSteps.push("echo \"安装命令已执行完成。请回到 Smart Import 设置页点击‘重新检测环境’。\"");
+    }
+
+    const manualCommands = platform === "darwin"
+      ? (shellSteps.length
+        ? shellSteps.join("\n")
+        : "# 当前未检测到需要安装的本地依赖。")
+      : [
+          "# 当前平台暂不支持插件内自动打开终端安装。",
+          "# 请按你的系统包管理方式手动安装所需依赖：",
+          "# 必需：markitdown",
+          "# 可选：python3、tesseract、pypdfium2、LibreOffice / soffice"
+        ].join("\n");
+
+    return {
+      platform,
+      platformLabel,
+      environment,
+      missingItems,
+      notes,
+      hasAutoInstall: platform === "darwin" && shellSteps.length > 0,
+      commandText: manualCommands,
+      canResetConverterPath: converterPathInvalid
+    };
+  }
+
+  async copyTextToClipboard(text) {
+    const { clipboard } = await getElectronModules();
+    if (!clipboard || typeof clipboard.writeText !== "function") {
+      return false;
+    }
+
+    clipboard.writeText(String(text || ""));
+    return true;
+  }
+
+  async openDependencyInstallWizard() {
+    const modal = new DependencyInstallWizardModal(this.app, this);
+    modal.open();
+  }
+
+  async runDependencyInstallPlan(plan) {
+    if (!plan || !plan.hasAutoInstall || !plan.commandText) {
+      throw new Error("当前平台不支持自动打开终端执行安装脚本。");
+    }
+
+    const scriptPath = path.join(os.tmpdir(), `smart-import-install-${Date.now()}.sh`);
+    await fs.writeFile(scriptPath, `${String(plan.commandText || "").trim()}\n`, "utf8");
+    await fs.chmod(scriptPath, 0o755);
+
+    if (process.platform === "darwin") {
+      const appleScript = [
+        `set smartImportScript to POSIX file "${scriptPath.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"`,
+        'tell application "Terminal"',
+        "activate",
+        'do script "/bin/bash " & quoted form of POSIX path of smartImportScript',
+        "end tell"
+      ];
+      await execFileAsync("/usr/bin/osascript", appleScript.flatMap((line) => ["-e", line]));
+      return scriptPath;
+    }
+
+    throw new Error("当前平台暂不支持自动打开终端执行安装脚本。");
   }
 
   async ensurePdfOcrScriptPath() {
@@ -4028,11 +4282,11 @@ module.exports = class SmartImportPlugin extends Plugin {
       : {
           ok: true,
           detail: "",
-          version: "",
-          command: ""
+        version: "",
+        command: ""
         };
     if (requiresConverter && !environment.ok) {
-      new Notice(`当前无法导入：${environment.detail}`, 8000);
+      new Notice(`当前无法导入：${environment.detail}。请到插件设置里的“本地依赖与兼容性”查看缺失项。`, 8000);
       await this.activateView();
       await this.refreshInboxViews();
       return { results: [] };
@@ -5134,7 +5388,7 @@ module.exports = class SmartImportPlugin extends Plugin {
         }
       : await this.checkEnvironment(true);
     if (needsMarkdownConverter && !environment.ok) {
-      new Notice(`当前无法导入：${environment.detail}`, 8000);
+      new Notice(`当前无法导入：${environment.detail}。请到插件设置里的“本地依赖与兼容性”查看缺失项。`, 8000);
       return null;
     }
 
@@ -6781,10 +7035,191 @@ class DeleteImportConfirmModal extends Modal {
   }
 }
 
+class DependencyInstallWizardModal extends Modal {
+  constructor(app, plugin) {
+    super(app);
+    this.plugin = plugin;
+    this.plan = null;
+    this.statusEl = null;
+    this.bodyEl = null;
+  }
+
+  async refreshPlan(force = true) {
+    if (!this.statusEl || !this.bodyEl) {
+      return;
+    }
+
+    this.statusEl.setText("正在检测本机依赖…");
+    this.bodyEl.empty();
+    try {
+      this.plan = await this.plugin.buildDependencyInstallPlan(force);
+      this.statusEl.setText("检测完成。");
+      this.renderPlan();
+    } catch (error) {
+      this.statusEl.setText("检测失败。");
+      this.bodyEl.createEl("div", {
+        text: error && error.message ? error.message : "请稍后重试。"
+      });
+    }
+  }
+
+  renderPlan() {
+    if (!this.bodyEl || !this.plan) {
+      return;
+    }
+
+    const { missingItems, notes, platformLabel, environment } = this.plan;
+    this.bodyEl.empty();
+
+    const summary = this.bodyEl.createDiv({ cls: "smart-import-preview-card" });
+    addInfoRow(summary.createDiv({ cls: "smart-import-modal__info" }), "平台", platformLabel);
+    addInfoRow(
+      summary.createDiv({ cls: "smart-import-modal__info" }),
+      "markitdown 状态",
+      environment.ok ? "已就绪" : "未就绪"
+    );
+    addInfoRow(
+      summary.createDiv({ cls: "smart-import-modal__info" }),
+      "缺失项",
+      missingItems.length ? `${missingItems.length} 项` : "0 项"
+    );
+
+    if (missingItems.length) {
+      const list = this.bodyEl.createEl("ul");
+      missingItems.forEach((item) => {
+        list.createEl("li", {
+          text: `${item.required ? "必需" : "可选"}：${item.label}。${item.detail}`
+        });
+      });
+    } else {
+      this.bodyEl.createEl("p", {
+        cls: "smart-import-description",
+        text: "当前已检测到插件所需依赖。若导入仍异常，请检查“转换器路径”配置或 shell PATH。"
+      });
+    }
+
+    if (notes && notes.length) {
+      const noteCard = this.bodyEl.createDiv({ cls: "smart-import-preview-card" });
+      noteCard.createEl("strong", { text: "提示" });
+      const noteList = noteCard.createEl("ul");
+      notes.forEach((note) => {
+        noteList.createEl("li", { text: note });
+      });
+    }
+
+    const commandCard = this.bodyEl.createDiv({ cls: "smart-import-preview-card" });
+    commandCard.createEl("strong", { text: "安装命令" });
+    commandCard.createEl("pre", {
+      cls: "smart-import-preview-card__text",
+      text: this.plan.commandText
+    });
+
+    const actions = this.bodyEl.createDiv({ cls: "smart-import-actions" });
+    makeVisibleActionRow(actions);
+
+    const refreshButton = actions.createEl("button", { text: "重新检测" });
+    refreshButton.classList.add("smart-import-secondary-button");
+    styleActionButton(refreshButton, "secondary");
+    refreshButton.addEventListener("click", async () => {
+      refreshButton.disabled = true;
+      try {
+        await this.refreshPlan(true);
+      } finally {
+        refreshButton.disabled = false;
+      }
+    });
+
+    const copyButton = actions.createEl("button", { text: "复制命令" });
+    copyButton.classList.add("smart-import-secondary-button");
+    styleActionButton(copyButton, "secondary");
+    copyButton.addEventListener("click", async () => {
+      const copied = await this.plugin.copyTextToClipboard(this.plan.commandText);
+      new Notice(copied ? "安装命令已复制到剪贴板。" : "当前环境无法写入剪贴板，请手动复制。", 5000);
+    });
+
+    if (this.plan.canResetConverterPath) {
+      const resetButton = actions.createEl("button", { text: "清空转换器路径" });
+      resetButton.classList.add("smart-import-secondary-button");
+      styleActionButton(resetButton, "secondary");
+      resetButton.addEventListener("click", async () => {
+        this.plugin.settings.converterPath = "";
+        await this.plugin.saveSettings();
+        new Notice("已清空“转换器路径”，请重新检测环境。", 5000);
+        await this.refreshPlan(true);
+      });
+    }
+
+    if (this.plan.hasAutoInstall) {
+      const runButton = actions.createEl("button", { text: "在终端中运行安装命令" });
+      runButton.classList.add("smart-import-primary-button");
+      styleActionButton(runButton, "primary");
+      runButton.addEventListener("click", async () => {
+        runButton.disabled = true;
+        try {
+          await this.plugin.runDependencyInstallPlan(this.plan);
+          new Notice("已打开系统终端并开始执行安装命令。过程中可能需要输入系统密码。", 7000);
+        } catch (error) {
+          new Notice(error && error.message ? error.message : "打开终端失败。", 7000);
+        } finally {
+          runButton.disabled = false;
+        }
+      });
+    }
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("smart-import-modal");
+
+    contentEl.createEl("h2", { text: "依赖安装向导" });
+    contentEl.createEl("p", {
+      cls: "smart-import-description",
+      text: "向导会检测当前机器缺失的本地依赖，并在支持的平台上打开系统终端执行安装命令。执行前请先确认你信任这些系统级安装动作。"
+    });
+
+    this.statusEl = contentEl.createEl("p", {
+      cls: "smart-import-description smart-import-description--subtle",
+      text: "正在检测本机依赖…"
+    });
+    this.bodyEl = contentEl.createDiv();
+    this.refreshPlan(true);
+  }
+}
+
 class SmartImportSettingTab extends PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
+    this.environmentStatusEl = null;
+    this.environmentStatusMetaEl = null;
+  }
+
+  renderEnvironmentStatus(environment) {
+    if (!this.environmentStatusEl) {
+      return;
+    }
+
+    this.environmentStatusEl.empty();
+    const summary = environment.ok
+      ? `markitdown 已就绪${environment.version ? `：${environment.version}` : "。"}`
+      : `markitdown 未就绪：${environment.detail || "请检查路径或系统 PATH。"}`;
+
+    this.environmentStatusEl.createEl("div", { text: summary });
+    this.environmentStatusEl.createEl("div", {
+      cls: "setting-item-description",
+      text: environment.ok
+        ? (
+          environment.optionalDependencies && environment.optionalDependencies.length
+            ? `可选依赖缺失：${environment.optionalDependencies.join("、")}`
+            : "可选依赖已就绪。"
+        )
+        : "缺少必需依赖时，docx / pdf / pptx / xlsx / xls / doc 等需要转换的文件将无法导入。"
+    });
   }
 
   display() {
@@ -6792,6 +7227,77 @@ class SmartImportSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     containerEl.createEl("h2", { text: "文件管理" });
+
+    const dependencySection = containerEl.createDiv();
+    dependencySection.createEl("h3", { text: "本地依赖与兼容性" });
+    dependencySection.createEl("p", {
+      cls: "setting-item-description",
+      text: "通过 GitHub 或 BRAT 安装后，插件会直接在本机调用这些工具。缺少必需依赖时，相关导入能力会受限。"
+    });
+    const dependencyList = dependencySection.createEl("ul");
+    LOCAL_DEPENDENCY_REQUIREMENTS.required.forEach((item) => {
+      dependencyList.createEl("li", { text: `必需：${item}` });
+    });
+    LOCAL_DEPENDENCY_REQUIREMENTS.optional.forEach((item) => {
+      dependencyList.createEl("li", { text: `可选：${item}` });
+    });
+    LOCAL_DEPENDENCY_REQUIREMENTS.notes.forEach((item) => {
+      dependencyList.createEl("li", { text: `说明：${item}` });
+    });
+
+    const environmentCard = dependencySection.createDiv({ cls: "smart-import-preview-card" });
+    environmentCard.createEl("strong", { text: "当前环境检测" });
+    this.environmentStatusMetaEl = environmentCard.createEl("div", {
+      cls: "setting-item-description",
+      text: "正在检测本机依赖…"
+    });
+    this.environmentStatusEl = environmentCard.createDiv();
+    this.plugin.checkEnvironment(true).then((environment) => {
+      if (this.environmentStatusMetaEl) {
+        this.environmentStatusMetaEl.setText("状态会随“重新检测环境”实时刷新。");
+      }
+      this.renderEnvironmentStatus(environment);
+    }).catch((error) => {
+      if (this.environmentStatusMetaEl) {
+        this.environmentStatusMetaEl.setText("环境检测失败。");
+      }
+      this.renderEnvironmentStatus({
+        ok: false,
+        detail: error && error.message ? error.message : "请检查本地依赖和 PATH。",
+        version: "",
+        optionalDependencies: []
+      });
+    });
+
+    new Setting(containerEl)
+      .setName("重新检测环境")
+      .setDesc("刷新 markitdown 与可选本地依赖的检测结果。")
+      .addButton((button) =>
+        button.setButtonText("立即检测").onClick(async () => {
+          button.setDisabled(true);
+          if (this.environmentStatusMetaEl) {
+            this.environmentStatusMetaEl.setText("正在检测本机依赖…");
+          }
+          try {
+            const environment = await this.plugin.checkEnvironment(true);
+            this.renderEnvironmentStatus(environment);
+            if (this.environmentStatusMetaEl) {
+              this.environmentStatusMetaEl.setText("已刷新。");
+            }
+          } finally {
+            button.setDisabled(false);
+          }
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("依赖安装向导")
+      .setDesc("检测缺失依赖，并在支持的平台上打开系统终端执行安装命令。")
+      .addButton((button) =>
+        button.setButtonText("打开向导").onClick(async () => {
+          await this.plugin.openDependencyInstallWizard();
+        })
+      );
 
     new Setting(containerEl)
       .setName("转换器路径")

@@ -1,6 +1,6 @@
 {
   "name": "obsidian-smart-import",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Desktop-only Smart Import plugin for Markdown-based vault workflows.",
   "type": "module",
   "engines": {

@@ -1,7 +1,7 @@
 {
   "id": "smart-import",
   "name": "Smart Import",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "minAppVersion": "1.0.0",
   "description": "Desktop-only file importer that converts external files into Markdown and stores source assets inside the vault.",
   "author": "xuziming",

@@ -1,9 +1,16 @@
 # Changelog
 
+## 0.2.2
+
+- added first-launch dependency prompting so GitHub / BRAT installs can reach a working state faster
+- rewrote install docs around GitHub Release and BRAT flows instead of assuming community-directory discovery
+- expanded the dependency install wizard so users can open it from settings or the command palette and run the recommended local install commands in Terminal on macOS
+
 ## 0.2.1
 
 - removed `Obsidian` from the plugin description so Community Plugin validation accepts the submission metadata
 - refreshed community submission metadata for the 0.2.1 patch release
+- added a semi-automatic dependency install wizard that can open Terminal on macOS and run the recommended local install commands
 
 ## 0.2.0
 

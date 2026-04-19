@@ -79,7 +79,38 @@ npm run release:prepare
 
 See [RELEASING.md](./RELEASING.md) for the full release flow.
 
-## Install into Obsidian
+## Install from GitHub
+
+### Option 1: BRAT
+
+1. Install the [BRAT plugin](https://github.com/TfTHacker/obsidian42-brat)
+2. Add this repo:
+
+```text
+https://github.com/0126-hash/obsidian-smart-import
+```
+
+3. Enable `Smart Import` in Community Plugins
+
+### Option 2: GitHub Release assets
+
+Download the latest release and copy these files into:
+
+```text
+<your-vault>/.obsidian/plugins/smart-import/
+```
+
+- `main.js`
+- `manifest.json`
+- `styles.css`
+
+Then enable `Smart Import` in Community Plugins.
+
+### First launch
+
+If your machine is missing required local dependencies, the plugin will automatically open the dependency install wizard on first launch. On macOS, the wizard can open Terminal and run the recommended install commands after you confirm.
+
+## Manual install into Obsidian
 
 Copy these files into:
 
@@ -99,6 +130,7 @@ Copy these files into:
 - Natural-language import searches local folders such as `~/Downloads` and `~/Desktop`, and may also look at Finder selection or clipboard file candidates when the request implies them.
 - When AI features are enabled and an OpenAI-compatible provider is configured, note content and import snapshots may be sent to that provider.
 - Environment diagnostics now distinguish between required and optional dependencies so users can tell whether only advanced OCR or `.doc` import is affected.
+- The settings page now includes a dependency install wizard that can open Terminal on macOS and run the recommended install commands after user confirmation.
 - For community-plugin installs, the OCR helper script is generated on demand by `main.js`, so the standard Obsidian release assets remain sufficient.
 
 See [PRIVACY.md](./PRIVACY.md) for data handling notes.

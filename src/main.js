@@ -13,6 +13,7 @@ const {
   normalizePath
 } = require("obsidian");
 const { execFile } = require("child_process");
+const fsSync = require("fs");
 const fs = require("fs/promises");
 const path = require("path");
 const os = require("os");
@@ -504,12 +505,121 @@ function buildUrlImportTitle(normalizedUrl, pageTitle, hostname) {
 }
 
 async function findCommandPath(commandName) {
+  const directPath = await findCommandPathInDirectories(commandName, getCommandSearchDirectories());
+  if (directPath) {
+    return directPath;
+  }
+
+  const shellCandidates = getCommandSearchShellCandidates();
+  for (const shellPath of shellCandidates) {
+    const shellResolved = await findCommandPathViaShell(shellPath, commandName);
+    if (shellResolved) {
+      return shellResolved;
+    }
+  }
+
+  const quotedCommandName = String(commandName).replace(/'/g, `'\\''`);
   try {
-    const response = await execFileAsync("/bin/sh", ["-lc", `command -v ${commandName}`]);
-    return String(response.stdout || "").trim().split(/\r?\n/)[0] || "";
+    const response = await execFileAsync("/bin/sh", ["-lc", `command -v '${quotedCommandName}'`]);
+    const resolvedPath = String(response.stdout || "").trim().split(/\r?\n/)[0] || "";
+    return await isExecutableFile(resolvedPath) ? resolvedPath : "";
   } catch {
     return "";
   }
+}
+
+function getCommandSearchDirectories() {
+  const homeDir = os.homedir();
+  const pathEntries = String(process.env.PATH || "")
+    .split(path.delimiter)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+  const preferredDirectories = [
+    path.join(homeDir, ".local/bin"),
+    path.join(homeDir, ".npm-global/bin"),
+    path.join(homeDir, ".cargo/bin"),
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/usr/local/bin",
+    "/usr/local/sbin",
+    "/usr/bin",
+    "/bin"
+  ];
+
+  return uniqueStrings([...pathEntries, ...preferredDirectories]);
+}
+
+function getCommandSearchShellCandidates() {
+  const configuredShell = String(process.env.SHELL || "").trim();
+  const candidates = configuredShell ? [configuredShell] : [];
+
+  if (process.platform === "darwin") {
+    candidates.push("/bin/zsh", "/bin/bash", "/bin/sh");
+  } else if (process.platform === "win32") {
+    candidates.push("powershell.exe");
+  } else {
+    candidates.push("/bin/bash", "/bin/sh");
+  }
+
+  return uniqueStrings(candidates);
+}
+
+async function isExecutableFile(targetPath) {
+  try {
+    await fs.access(targetPath, fsSync.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function findCommandPathInDirectories(commandName, directories) {
+  const executableSuffixes = process.platform === "win32"
+    ? uniqueStrings((process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";").map((item) => item.toLowerCase()))
+    : [""];
+
+  for (const directoryPath of directories) {
+    if (!directoryPath) {
+      continue;
+    }
+
+    for (const suffix of executableSuffixes) {
+      const candidate = path.join(directoryPath, process.platform === "win32" ? `${commandName}${suffix}` : commandName);
+      if (await isExecutableFile(candidate)) {
+        return candidate;
+      }
+    }
+  }
+
+  return "";
+}
+
+async function findCommandPathViaShell(shellPath, commandName) {
+  if (!shellPath) {
+    return "";
+  }
+
+  const shellName = path.basename(shellPath).toLowerCase();
+  const quotedCommandName = String(commandName).replace(/'/g, `'\\''`);
+  const shellArgs = shellName.includes("zsh") || shellName.includes("bash")
+    ? ["-lic", `command -v '${quotedCommandName}'`]
+    : ["-lc", `command -v '${quotedCommandName}'`];
+
+  try {
+    const response = await execFileAsync(shellPath, shellArgs);
+    const resolvedPath = String(response.stdout || "").trim().split(/\r?\n/)[0] || "";
+    if (!resolvedPath) {
+      return "";
+    }
+
+    if (await isExecutableFile(resolvedPath)) {
+      return resolvedPath;
+    }
+  } catch {
+  }
+
+  return "";
 }
 
 async function pathExists(targetPath) {
@@ -2892,8 +3002,10 @@ module.exports = class SmartImportPlugin extends Plugin {
 
     this.settings.dependencyWizardLastPromptedVersion = currentVersion;
     await this.saveSettings();
-    new Notice("检测到 Smart Import 缺少本地依赖，已自动打开安装向导。", 7000);
-    await this.openDependencyInstallWizard();
+    new Notice(
+      "Smart Import 已安装。md/txt 可直接导入；如需导入 docx、pdf、pptx、xlsx、xls、doc，请在设置里打开“依赖安装向导”。",
+      9000
+    );
   }
 
   async loadActivityStore() {
@@ -4286,9 +4398,10 @@ module.exports = class SmartImportPlugin extends Plugin {
         command: ""
         };
     if (requiresConverter && !environment.ok) {
-      new Notice(`当前无法导入：${environment.detail}。请到插件设置里的“本地依赖与兼容性”查看缺失项。`, 8000);
+      new Notice(`当前无法导入：${environment.detail}。已为你打开依赖安装向导。`, 8000);
       await this.activateView();
       await this.refreshInboxViews();
+      await this.openDependencyInstallWizard();
       return { results: [] };
     }
 
@@ -5388,7 +5501,8 @@ module.exports = class SmartImportPlugin extends Plugin {
         }
       : await this.checkEnvironment(true);
     if (needsMarkdownConverter && !environment.ok) {
-      new Notice(`当前无法导入：${environment.detail}。请到插件设置里的“本地依赖与兼容性”查看缺失项。`, 8000);
+      new Notice(`当前无法导入：${environment.detail}。已为你打开依赖安装向导。`, 8000);
+      await this.openDependencyInstallWizard();
       return null;
     }
 

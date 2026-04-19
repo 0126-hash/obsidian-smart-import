@@ -84,13 +84,17 @@ See [RELEASING.md](./RELEASING.md) for the full release flow.
 ### Option 1: BRAT
 
 1. Install the [BRAT plugin](https://github.com/TfTHacker/obsidian42-brat)
-2. Add this repo:
+2. Open BRAT and run `Add a beta plugin for testing`
+3. In the repository field, enter this repo slug:
 
 ```text
-https://github.com/0126-hash/obsidian-smart-import
+0126-hash/obsidian-smart-import
 ```
 
-3. Enable `Smart Import` in Community Plugins
+4. Choose `Latest version`
+5. Keep `Enable after installing the plugin` checked
+6. Click `Add plugin`
+7. Confirm that `Smart Import` is enabled in Community Plugins
 
 ### Option 2: GitHub Release assets
 
@@ -108,7 +112,11 @@ Then enable `Smart Import` in Community Plugins.
 
 ### First launch
 
-If your machine is missing required local dependencies, the plugin will automatically open the dependency install wizard on first launch. On macOS, the wizard can open Terminal and run the recommended install commands after you confirm.
+First launch is non-blocking:
+
+- `md` and `txt` imports work immediately
+- if you later import `docx`, `pdf`, `pptx`, `xlsx`, `xls`, or `doc` without `markitdown`, Smart Import will open the dependency install wizard for you
+- on macOS, the wizard can open Terminal and run the recommended install commands after you confirm
 
 ## Manual install into Obsidian
 

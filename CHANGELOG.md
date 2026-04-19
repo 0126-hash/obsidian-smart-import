@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.3
+
+- made `markitdown` detection more robust for GUI installs by probing common user-local bin directories before falling back to shell lookup
+- stopped auto-opening the dependency wizard on first launch so `md` and `txt` imports are not blocked for brand-new installs
+- updated BRAT install instructions to use the repo slug plus `Latest version`, matching the flow that works reliably in testing
+
 ## 0.2.2
 
 - added first-launch dependency prompting so GitHub / BRAT installs can reach a working state faster

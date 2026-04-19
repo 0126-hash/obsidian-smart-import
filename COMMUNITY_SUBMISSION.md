@@ -7,8 +7,8 @@ This file collects the exact metadata needed to submit `Smart Import` to the Obs
 - repo: `0126-hash/obsidian-smart-import`
 - branch: `main`
 - manifest path: `/manifest.json`
-- latest public release: `0.2.1`
-- latest release URL: `https://github.com/0126-hash/obsidian-smart-import/releases/tag/0.2.1`
+- latest public release: `0.2.3`
+- latest release URL: `https://github.com/0126-hash/obsidian-smart-import/releases/tag/0.2.3`
 
 ## Community directory entry
 

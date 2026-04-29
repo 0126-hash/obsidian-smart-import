@@ -19,7 +19,12 @@ const path = require("path");
 const os = require("os");
 
 const VIEW_TYPE = "smart-import-inbox-view";
-const SUPPORTED_EXTENSIONS = new Set(["doc", "docx", "xls", "xlsx", "pdf", "pptx", "md", "txt"]);
+const SUPPORTED_EXTENSION_LIST = ["doc", "docx", "xls", "xlsx", "pdf", "pptx", "md", "txt", "epub", "mobi", "azw3"];
+const SUPPORTED_EXTENSIONS = new Set(SUPPORTED_EXTENSION_LIST);
+const EBOOK_EXTENSIONS = new Set(["epub", "mobi", "azw3"]);
+const SUPPORTED_FILE_TYPES_LABEL = "Word、Excel、PDF、PPT、Markdown、TXT、EPUB、MOBI、AZW3";
+const SUPPORTED_FILE_EXTENSIONS_LABEL = "doc/docx/xls/xlsx/pdf/pptx/md/txt/epub/mobi/azw3";
+const SUPPORTED_FILE_INPUT_ACCEPT = SUPPORTED_EXTENSION_LIST.map((extension) => `.${extension}`).join(",");
 const DISCOVERABLE_FALLBACK_EXTENSIONS = new Set(["csv", "rtf", "html", "htm", "odt", "ods", "odp", "ppt", "pptm", "docm"]);
 const INTERNAL_ROOT_DIR = ".openclaw";
 const INTERNAL_SOURCE_DIR = `${INTERNAL_ROOT_DIR}/source-files`;
@@ -29,7 +34,7 @@ const INTERNAL_ACTIVITY_EVENTS_DIR = `${INTERNAL_ACTIVITY_DIR}/events`;
 const INTERNAL_ACTIVITY_STORE_PATH = `${INTERNAL_ACTIVITY_DIR}/activity-store.json`;
 const ACTIVITY_BUS_EVENT = "openclaw:file-activity";
 const ACTIVITY_STORE_VERSION = 1;
-const TRACKED_ACTIVITY_EXTENSIONS = new Set(["md", "pdf", "doc", "docx", "pptx", "xls", "xlsx"]);
+const TRACKED_ACTIVITY_EXTENSIONS = new Set(["md", "pdf", "doc", "docx", "pptx", "xls", "xlsx", "epub", "mobi", "azw3"]);
 const IGNORED_ACTIVITY_PATH_PATTERNS = [
   /^\.openclaw(\/|$)/i,
   /^\.obsidian(\/|$)/i,
@@ -55,13 +60,15 @@ const DEFAULT_SETTINGS = {
 
 const LOCAL_DEPENDENCY_REQUIREMENTS = {
   required: [
-    "markitdown：导入 docx、pdf、pptx、xlsx、xls 等需要先转换成 Markdown 的文件时必需。"
+    "markitdown：导入 docx、pdf、pptx、xlsx、xls 等需要先转换成 Markdown 的文件时必需，也可处理部分电子书格式。"
   ],
   optional: [
     "python3：PDF OCR 备用链路依赖。",
     "tesseract：扫描版 PDF 的 OCR 识别依赖。",
     "pypdfium2：OCR 脚本的 Python 依赖。",
-    "LibreOffice / soffice：导入旧版 .doc 文件时先转成 .docx。"
+    "LibreOffice / soffice：导入旧版 .doc 文件时先转成 .docx。",
+    "pandoc：EPUB 电子书导入的备用转换器。",
+    "Calibre / ebook-convert：MOBI、AZW3 电子书导入的备用转换器。"
   ],
   notes: [
     "md、txt 可直接导入，不依赖上述转换工具。",
@@ -183,6 +190,28 @@ function showProgressNotice(existingNotice, message, timeout = 0) {
   }
 
   return new Notice(String(message || ""), timeout);
+}
+
+function summarizeImportErrorForNotice(errorOrMessage, extension, fallback = "操作失败。", maxLength = 90) {
+  const raw = typeof errorOrMessage === "string"
+    ? errorOrMessage
+    : (errorOrMessage && (errorOrMessage.stderr || errorOrMessage.message)) || fallback;
+  const message = String(raw || fallback).replace(/\s+/g, " ").trim().replace(/^Error:\s*/i, "") || fallback;
+  if (EBOOK_EXTENSIONS.has(String(extension || "").toLowerCase())) {
+    if (/unsupported|not supported|no converter|ebook-convert|pandoc|calibre|format|转换|converter/i.test(message)) {
+      return `${String(extension || "").toUpperCase()} 电子书转换失败，请安装 Calibre（ebook-convert）或可处理电子书的 markitdown/pandoc 环境。`;
+    }
+  }
+  if (/ENOENT|no such file|not found|找不到|未找到/i.test(message)) {
+    return "文件不存在或路径不可访问。";
+  }
+  if (/EACCES|EPERM|permission|权限/i.test(message)) {
+    return "没有权限访问该文件。";
+  }
+  if (/timeout|timed out|超时/i.test(message)) {
+    return "处理超时，请稍后重试或换用较小文件。";
+  }
+  return message.length > maxLength ? `${message.slice(0, maxLength - 1)}…` : message;
 }
 
 function normalizeImportedNoteWidthMode(value) {
@@ -1986,7 +2015,7 @@ function extractReadableHtmlSnippet(html, maxLength = 480) {
 function normalizeComparableTitle(value) {
   return String(value || "")
     .trim()
-    .replace(/\.(doc|docx|pdf|pptx|txt|md)$/i, "")
+    .replace(/\.(doc|docx|pdf|pptx|txt|md|epub|mobi|azw3)$/i, "")
     .replace(/\s+/g, " ")
     .toLowerCase();
 }
@@ -2455,6 +2484,9 @@ function formatSourceType(sourceType) {
   if (normalized === "pptx") return "PPT";
   if (normalized === "md") return "Markdown";
   if (normalized === "txt") return "文本";
+  if (normalized === "epub") return "EPUB";
+  if (normalized === "mobi") return "MOBI";
+  if (normalized === "azw3") return "AZW3";
   return normalized ? normalized.toUpperCase() : "文件";
 }
 
@@ -2463,6 +2495,7 @@ function detectDocumentType(sourceType, text) {
   if (sourceType === "xls" || sourceType === "xlsx" || content.includes("sheet") || content.includes("表格")) {
     return "表格资料";
   }
+  if (EBOOK_EXTENSIONS.has(String(sourceType || "").toLowerCase())) return "电子书";
   if (content.includes("合同") || content.includes("协议")) return "合同";
   if (content.includes("预算") || content.includes("报价")) return "预算";
   if (content.includes("汇报") || content.includes("ppt") || content.includes("slide")) return "汇报材料";
@@ -2484,6 +2517,8 @@ function generateRuleBasedAiSuggestions(record) {
     actions.push("检查 Markdown 结构并继续整理");
   } else if (record.source_type === "docx") {
     actions.push("整理为正式笔记");
+  } else if (EBOOK_EXTENSIONS.has(String(record.source_type || "").toLowerCase())) {
+    actions.push("整理章节结构和书摘重点");
   } else if (record.source_type === "xls" || record.source_type === "xlsx") {
     actions.push("检查表格列和工作表结构");
   } else if (record.output_note_path) {
@@ -3022,7 +3057,7 @@ module.exports = class SmartImportPlugin extends Plugin {
     this.settings.dependencyWizardLastPromptedVersion = currentVersion;
     await this.saveSettings();
     new Notice(
-      "Smart Import 已安装。md/txt 可直接导入；如需导入 docx、pdf、pptx、xlsx、xls、doc，请在设置里打开“依赖安装向导”。",
+      "Smart Import 已安装。md/txt 可直接导入；如需导入 docx、pdf、pptx、xlsx、xls、doc、epub、mobi、azw3，请在设置里打开“依赖安装向导”。",
       9000
     );
   }
@@ -3397,6 +3432,12 @@ module.exports = class SmartImportPlugin extends Plugin {
       if (!(await findCommandPath("soffice")) && !(await findCommandPath("libreoffice"))) {
         optionalDependencies.push("LibreOffice/soffice（导入 .doc）");
       }
+      if (!(await findCommandPath("pandoc"))) {
+        optionalDependencies.push("pandoc（EPUB 备用转换）");
+      }
+      if (!(await findCommandPath("ebook-convert"))) {
+        optionalDependencies.push("Calibre/ebook-convert（MOBI、AZW3 备用转换）");
+      }
       if (await findCommandPath("python3")) {
         try {
           await execFileAsync("python3", ["-c", "import pypdfium2"]);
@@ -3422,6 +3463,126 @@ module.exports = class SmartImportPlugin extends Plugin {
     return result;
   }
 
+  async checkConversionEnvironment(extension, force = false) {
+    const normalizedExtension = String(extension || "").toLowerCase();
+    if (!EBOOK_EXTENSIONS.has(normalizedExtension)) {
+      return this.checkEnvironment(force);
+    }
+
+    const now = Date.now();
+    const cacheKey = `ebook:${normalizedExtension}`;
+    if (
+      !force &&
+      this.ebookEnvironmentStatus &&
+      this.ebookEnvironmentStatus.cacheKey === cacheKey &&
+      now - this.ebookEnvironmentStatus.checkedAt < 5000
+    ) {
+      return this.ebookEnvironmentStatus;
+    }
+
+    const converterPath = (this.settings.converterPath || "").trim();
+    const markitdownCommand = converterPath || await findCommandPath("markitdown") || "";
+    const pandocCommand = await findCommandPath("pandoc");
+    const ebookConvertCommand = await findCommandPath("ebook-convert");
+    const result = {
+      checkedAt: now,
+      cacheKey,
+      command: markitdownCommand || (normalizedExtension === "epub" ? pandocCommand : "") || ebookConvertCommand,
+      markitdownCommand,
+      pandocCommand,
+      ebookConvertCommand,
+      ok: Boolean(
+        markitdownCommand ||
+        (normalizedExtension === "epub" && pandocCommand) ||
+        ebookConvertCommand
+      ),
+      detail: "",
+      version: "",
+      optionalDependencies: []
+    };
+
+    if (!result.ok) {
+      result.detail =
+        normalizedExtension === "epub"
+          ? "导入 EPUB 需要 markitdown 或 pandoc。请先安装其中一个转换器。"
+          : `导入 ${normalizedExtension.toUpperCase()} 需要 markitdown 电子书转换支持或 Calibre（ebook-convert）。`;
+      this.ebookEnvironmentStatus = result;
+      return result;
+    }
+
+    const versions = [];
+    for (const [name, command, args] of [
+      ["markitdown", markitdownCommand, ["--version"]],
+      ["pandoc", pandocCommand, ["--version"]],
+      ["ebook-convert", ebookConvertCommand, ["--version"]]
+    ]) {
+      if (!command) {
+        continue;
+      }
+      try {
+        const response = await execFileAsync(command, args);
+        const versionText = `${response.stdout || ""}${response.stderr || ""}`.trim().split(/\r?\n/)[0];
+        versions.push(versionText ? `${name}: ${versionText}` : `${name}: available`);
+      } catch {
+        versions.push(`${name}: available`);
+      }
+    }
+
+    result.version = versions.join("; ");
+    result.detail = result.version || "电子书转换器可用。";
+    this.ebookEnvironmentStatus = result;
+    return result;
+  }
+
+  async convertWithMarkitdown(command, sourcePath, outputPath) {
+    await execFileAsync(command, [sourcePath, "-o", outputPath]);
+    return fs.readFile(outputPath, "utf8");
+  }
+
+  async convertEbookToMarkdown(sourcePath, extension, tempDir, environment) {
+    const normalizedExtension = String(extension || "").toLowerCase();
+    const errors = [];
+    const markdownPath = path.join(tempDir, "ebook.md");
+    const textPath = path.join(tempDir, "ebook.txt");
+
+    if (environment.markitdownCommand) {
+      try {
+        return {
+          content: await this.convertWithMarkitdown(environment.markitdownCommand, sourcePath, markdownPath),
+          converterName: "markitdown"
+        };
+      } catch (error) {
+        errors.push(`markitdown: ${(error.stderr || error.message || error).toString().trim()}`);
+      }
+    }
+
+    if (normalizedExtension === "epub" && environment.pandocCommand) {
+      try {
+        await execFileAsync(environment.pandocCommand, [sourcePath, "-t", "gfm", "-o", markdownPath]);
+        return {
+          content: await fs.readFile(markdownPath, "utf8"),
+          converterName: "pandoc"
+        };
+      } catch (error) {
+        errors.push(`pandoc: ${(error.stderr || error.message || error).toString().trim()}`);
+      }
+    }
+
+    if (environment.ebookConvertCommand) {
+      try {
+        await execFileAsync(environment.ebookConvertCommand, [sourcePath, textPath]);
+        return {
+          content: await fs.readFile(textPath, "utf8"),
+          converterName: "ebook-convert"
+        };
+      } catch (error) {
+        errors.push(`ebook-convert: ${(error.stderr || error.message || error).toString().trim()}`);
+      }
+    }
+
+    throw new Error(errors.filter(Boolean).join("\n") || `${normalizedExtension.toUpperCase()} 电子书转换失败。`);
+  }
+
   async buildDependencyInstallPlan(force = false) {
     const environment = await this.checkEnvironment(force);
     const platform = process.platform;
@@ -3434,6 +3595,8 @@ module.exports = class SmartImportPlugin extends Plugin {
     const hasPipx = Boolean(await findCommandPath("pipx"));
     const hasTesseract = Boolean(await findCommandPath("tesseract"));
     const hasLibreOffice = Boolean((await findCommandPath("soffice")) || (await findCommandPath("libreoffice")));
+    const hasPandoc = Boolean(await findCommandPath("pandoc"));
+    const hasEbookConvert = Boolean(await findCommandPath("ebook-convert"));
     let hasPypdfium2 = false;
     if (hasPython3) {
       try {
@@ -3487,6 +3650,22 @@ module.exports = class SmartImportPlugin extends Plugin {
         detail: "导入旧版 .doc 文件时先转成 .docx。"
       });
     }
+    if (!hasPandoc) {
+      missingItems.push({
+        id: "pandoc",
+        label: "pandoc",
+        required: false,
+        detail: "EPUB 电子书导入的备用转换器。"
+      });
+    }
+    if (!hasEbookConvert) {
+      missingItems.push({
+        id: "ebook-convert",
+        label: "Calibre / ebook-convert",
+        required: false,
+        detail: "MOBI、AZW3 电子书导入的备用转换器。"
+      });
+    }
 
     if (converterPathInvalid) {
       notes.push("当前“转换器路径”配置指向不存在的文件。你可以清空这个设置，让插件回退到系统 PATH 自动探测。");
@@ -3518,12 +3697,19 @@ module.exports = class SmartImportPlugin extends Plugin {
       const brewPackages = [];
       if (!hasPython3) brewPackages.push("python");
       if (!hasTesseract) brewPackages.push("tesseract");
+      if (!hasPandoc) brewPackages.push("pandoc");
       if (!hasLibreOffice) brewPackages.push("libreoffice");
       if (!hasPipx && missingItems.some((item) => item.id === "markitdown")) {
         brewPackages.push("pipx");
       }
       if (brewPackages.length) {
         shellSteps.push(`brew install ${uniqueStrings(brewPackages).join(" ")}`);
+      }
+
+      if (!hasEbookConvert) {
+        shellSteps.push("if ! command -v ebook-convert >/dev/null 2>&1; then");
+        shellSteps.push("  brew install --cask calibre || true");
+        shellSteps.push("fi");
       }
 
       if (missingItems.some((item) => item.id === "markitdown")) {
@@ -3562,7 +3748,7 @@ module.exports = class SmartImportPlugin extends Plugin {
           "# 当前平台暂不支持插件内自动打开终端安装。",
           "# 请按你的系统包管理方式手动安装所需依赖：",
           "# 必需：markitdown",
-          "# 可选：python3、tesseract、pypdfium2、LibreOffice / soffice"
+          "# 可选：python3、tesseract、pypdfium2、LibreOffice / soffice、pandoc、Calibre / ebook-convert"
         ].join("\n");
 
     return {
@@ -4355,7 +4541,7 @@ module.exports = class SmartImportPlugin extends Plugin {
       }
 
       if (clipboardFiles.existingPaths.length) {
-        new Notice("已识别到剪贴板中的文件，但当前仅支持 Word、Excel、PDF、PPT、Markdown、TXT。", 7000);
+        new Notice(`已识别到剪贴板中的文件，但当前仅支持 ${SUPPORTED_FILE_TYPES_LABEL}。`, 7000);
         return { imported: false, mode: "unsupported-file" };
       }
 
@@ -4403,21 +4589,18 @@ module.exports = class SmartImportPlugin extends Plugin {
       return { results: [] };
     }
 
-    const requiresConverter = paths.some((filePath) => {
-      const extension = path.extname(String(filePath || "")).slice(1).toLowerCase();
-      return SUPPORTED_EXTENSIONS.has(extension) && extension !== "md" && extension !== "txt";
-    });
+    const conversionExtensions = uniqueStrings(paths.map((filePath) =>
+      path.extname(String(filePath || "")).slice(1).toLowerCase()
+    )).filter((extension) => SUPPORTED_EXTENSIONS.has(extension) && extension !== "md" && extension !== "txt");
 
-    const environment = requiresConverter
-      ? await this.checkEnvironment()
-      : {
-          ok: true,
-          detail: "",
-        version: "",
-        command: ""
-        };
-    if (requiresConverter && !environment.ok) {
-      new Notice(`当前无法导入：${environment.detail}。已为你打开依赖安装向导。`, 8000);
+    const environmentResults = [];
+    for (const extension of conversionExtensions) {
+      environmentResults.push(await this.checkConversionEnvironment(extension));
+    }
+
+    const missingEnvironment = environmentResults.find((environment) => !environment.ok);
+    if (missingEnvironment) {
+      new Notice(`当前无法导入：${missingEnvironment.detail}。已为你打开依赖安装向导。`, 8000);
       await this.activateView();
       await this.refreshInboxViews();
       await this.openDependencyInstallWizard();
@@ -4513,7 +4696,7 @@ module.exports = class SmartImportPlugin extends Plugin {
     const candidates = files.length ? files : fallbackFiles.slice(0, 10);
 
     if (!candidates.length) {
-      new Notice("Downloads 中没有可导入的 Word、Excel、PDF、PPT、Markdown 或 TXT 文件。", 6000);
+      new Notice(`Downloads 中没有可导入的 ${SUPPORTED_FILE_TYPES_LABEL} 文件。`, 6000);
       return;
     }
 
@@ -4545,7 +4728,7 @@ module.exports = class SmartImportPlugin extends Plugin {
           filters: [
             {
               name: "Supported Files",
-              extensions: Array.from(SUPPORTED_EXTENSIONS)
+              extensions: SUPPORTED_EXTENSION_LIST
             },
             {
               name: "All Files",
@@ -4571,6 +4754,7 @@ module.exports = class SmartImportPlugin extends Plugin {
     return new Promise((resolve) => {
       const input = document.createElement("input");
       input.type = "file";
+      input.accept = SUPPORTED_FILE_INPUT_ACCEPT;
       input.multiple = true;
       input.style.display = "none";
       let settled = false;
@@ -5524,6 +5708,7 @@ module.exports = class SmartImportPlugin extends Plugin {
     const isDirectMarkdown = extension === "md";
     const isDirectText = extension === "txt";
     const isLegacyWord = extension === "doc";
+    const isEbook = EBOOK_EXTENSIONS.has(extension);
     const needsMarkdownConverter = isSupported && !isDirectMarkdown && !isDirectText;
     const keepOriginal = options.keepOriginal == null ? Boolean(this.settings.keepOriginal) : Boolean(options.keepOriginal);
     const inboxRoot = normalizePath(options.outputDir || this.settings.outputDir || DEFAULT_SETTINGS.outputDir);
@@ -5535,7 +5720,7 @@ module.exports = class SmartImportPlugin extends Plugin {
           version: "",
           detail: ""
         }
-      : await this.checkEnvironment(true);
+      : await this.checkConversionEnvironment(extension, true);
     if (needsMarkdownConverter && !environment.ok) {
       new Notice(`当前无法导入：${environment.detail}。已为你打开依赖安装向导。`, 8000);
       await this.openDependencyInstallWizard();
@@ -5569,7 +5754,9 @@ module.exports = class SmartImportPlugin extends Plugin {
           ? "direct-copy"
           : isLegacyWord
             ? "libreoffice+markitdown"
-            : "markitdown",
+            : isEbook
+              ? "ebook"
+              : "markitdown",
       converterVersion: environment.version,
       warning: "",
       previewText: "",
@@ -5624,7 +5811,7 @@ module.exports = class SmartImportPlugin extends Plugin {
           outputAssetsPath: "",
           importRecordPath,
           warning: unsupportedWarning,
-          manualNextStep: "建议先转换为 docx、pdf、pptx、xlsx、md 或 txt 后再重试导入。",
+          manualNextStep: "建议先转换为 docx、pdf、pptx、xlsx、md、txt、epub、mobi 或 azw3 后再重试导入。",
           content: ""
         });
         const file = await this.app.vault.create(outputNotePath, markdown);
@@ -5685,12 +5872,17 @@ module.exports = class SmartImportPlugin extends Plugin {
         conversionSourcePath = await convertLegacyWordToDocx(sourcePath, tempDir);
       }
 
-      let convertedContent = isDirectMarkdown || isDirectText
-        ? await fs.readFile(sourcePath, "utf8")
-        : await (async () => {
-            await execFileAsync(environment.command, [conversionSourcePath, "-o", tempMarkdownPath]);
-            return fs.readFile(tempMarkdownPath, "utf8");
-          })();
+      let actualConverterName = isDirectMarkdown || isDirectText ? "direct-copy" : isLegacyWord ? "libreoffice+markitdown" : "markitdown";
+      let convertedContent = "";
+      if (isDirectMarkdown || isDirectText) {
+        convertedContent = await fs.readFile(sourcePath, "utf8");
+      } else if (isEbook) {
+        const ebookResult = await this.convertEbookToMarkdown(conversionSourcePath, extension, tempDir, environment);
+        convertedContent = ebookResult.content;
+        actualConverterName = ebookResult.converterName;
+      } else {
+        convertedContent = await this.convertWithMarkitdown(environment.command, conversionSourcePath, tempMarkdownPath);
+      }
       let importStatus = "imported_to_inbox";
       let warning = "";
       let manualNextStep = "";
@@ -5732,7 +5924,7 @@ module.exports = class SmartImportPlugin extends Plugin {
         sourceFileStoredPath: originalFile,
         importedAt,
         importMethod,
-        converterName: isDirectMarkdown || isDirectText ? "direct-copy" : isLegacyWord ? "libreoffice+markitdown" : "markitdown",
+        converterName: actualConverterName,
         status: importStatus,
         outputNotePath,
         outputAssetsPath,
@@ -5747,6 +5939,7 @@ module.exports = class SmartImportPlugin extends Plugin {
         ...baseRecord,
         sourceFileStoredPath: originalFile,
         outputAssetsPath,
+        converterName: actualConverterName,
         previewText,
         status: importStatus,
         warning
@@ -5763,7 +5956,7 @@ module.exports = class SmartImportPlugin extends Plugin {
         source_type: extension,
         imported_at: importedAt,
         import_method: importMethod,
-        converter_name: isDirectMarkdown || isDirectText ? "direct-copy" : isLegacyWord ? "libreoffice+markitdown" : "markitdown",
+        converter_name: actualConverterName,
         converter_version: environment.version,
         warning,
         preview_text: previewText,
@@ -5809,7 +6002,7 @@ module.exports = class SmartImportPlugin extends Plugin {
         sourceFileStoredPath: originalFile,
         importedAt,
         importMethod,
-        converterName: isDirectMarkdown || isDirectText ? "direct-copy" : isLegacyWord ? "libreoffice+markitdown" : "markitdown",
+        converterName: isDirectMarkdown || isDirectText ? "direct-copy" : isLegacyWord ? "libreoffice+markitdown" : isEbook ? "ebook" : "markitdown",
         status: "failed",
         outputNotePath,
         outputAssetsPath: "",
@@ -5844,7 +6037,7 @@ module.exports = class SmartImportPlugin extends Plugin {
         source_type: extension,
         imported_at: importedAt,
         import_method: importMethod,
-        converter_name: isDirectMarkdown || isDirectText ? "direct-copy" : isLegacyWord ? "libreoffice+markitdown" : "markitdown",
+        converter_name: isDirectMarkdown || isDirectText ? "direct-copy" : isLegacyWord ? "libreoffice+markitdown" : isEbook ? "ebook" : "markitdown",
         converter_version: environment.version,
         warning: detail,
         preview_text: "",
@@ -5871,7 +6064,7 @@ module.exports = class SmartImportPlugin extends Plugin {
           warning: detail
         }
       });
-      new Notice(`导入失败：${fileName}，${detail}`, 8000);
+      new Notice(`导入失败：${fileName}，${summarizeImportErrorForNotice(detail, extension)}`, 8000);
       return {
         file,
         notePath: outputNotePath,
@@ -6661,7 +6854,7 @@ class SmartImportInboxView extends ItemView {
       const paths = await getDroppedPaths(event.dataTransfer);
 
       if (!paths.length) {
-        new Notice("没有识别到可导入的本地文件，请直接拖入文件本身，或拖入包含 doc/docx/xls/xlsx/pdf/pptx/md/txt 的文件夹。", 6000);
+        new Notice(`没有识别到可导入的本地文件，请直接拖入文件本身，或拖入包含 ${SUPPORTED_FILE_EXTENSIONS_LABEL} 的文件夹。`, 6000);
         return;
       }
 
@@ -7451,7 +7644,7 @@ class SmartImportSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("转换器路径")
-      .setDesc("markitdown 的绝对路径。留空则尝试使用系统 PATH。")
+      .setDesc("markitdown 的绝对路径。留空则尝试使用系统 PATH；EPUB 可回退到 pandoc，MOBI/AZW3 可回退到 Calibre 的 ebook-convert。")
       .addText((text) =>
         text
           .setPlaceholder("/usr/local/bin/markitdown 或留空自动探测")

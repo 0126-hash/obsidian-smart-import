@@ -16,6 +16,7 @@ The build step copies these sources into release-ready root files.
 - imports files and folders from outside the vault
 - supports file picker, drag-and-drop, recent downloads, Finder selection, clipboard, and natural-language lookup flows
 - converts supported documents into Markdown notes with import frontmatter
+- supports EPUB, MOBI, and AZW3 ebook imports through markitdown, pandoc, or Calibre fallbacks
 - preserves original source files inside the vault when enabled
 - generates partial stub notes for low-quality PDFs and unsupported files instead of failing silently
 - can extract embedded media assets from Office files when available
@@ -49,13 +50,16 @@ Optional but recommended:
 - `tesseract`
 - `pypdfium2` Python package
 - `LibreOffice` or `soffice`
+- `pandoc` for EPUB fallback conversion
+- `Calibre` / `ebook-convert` for MOBI and AZW3 fallback conversion
 
 Examples:
 
 ```bash
 pipx install markitdown
 python3 -m pip install pypdfium2
-brew install tesseract libreoffice
+brew install tesseract libreoffice pandoc
+brew install --cask calibre
 ```
 
 ## Local development
@@ -115,7 +119,7 @@ Then enable `Smart Import` in Community Plugins.
 First launch is non-blocking:
 
 - `md` and `txt` imports work immediately
-- if you later import `docx`, `pdf`, `pptx`, `xlsx`, `xls`, or `doc` without `markitdown`, Smart Import will open the dependency install wizard for you
+- if you later import `docx`, `pdf`, `pptx`, `xlsx`, `xls`, `doc`, `epub`, `mobi`, or `azw3` without the needed converter, Smart Import will open the dependency install wizard for you
 - on macOS, the wizard can open Terminal and run the recommended install commands after you confirm
 
 ## Manual install into Obsidian

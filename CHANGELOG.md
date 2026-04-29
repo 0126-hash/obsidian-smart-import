@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.5
+
+- added EPUB, MOBI, and AZW3 to file picker, drag-and-drop, clipboard, recent downloads, and activity stream handling
+- added ebook conversion fallbacks: EPUB can use pandoc, while MOBI/AZW3 can use Calibre's `ebook-convert`
+- updated dependency diagnostics and user-facing notices for ebook import failures
+
 ## 0.2.4
 
 - fixed a false-positive legacy-layout migration that could rewrite fresh imports after opening them

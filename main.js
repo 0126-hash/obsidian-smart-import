@@ -19,13 +19,45 @@ const path = require("path");
 const os = require("os");
 
 const VIEW_TYPE = "smart-import-inbox-view";
-const SUPPORTED_EXTENSION_LIST = ["doc", "docx", "xls", "xlsx", "pdf", "pptx", "md", "txt", "epub", "mobi", "azw3"];
+const SUPPORTED_EXTENSION_LIST = [
+  "doc",
+  "docx",
+  "docm",
+  "rtf",
+  "odt",
+  "xls",
+  "xlsx",
+  "ods",
+  "csv",
+  "json",
+  "xml",
+  "pdf",
+  "ppt",
+  "pptx",
+  "pptm",
+  "odp",
+  "html",
+  "htm",
+  "ipynb",
+  "zip",
+  "eml",
+  "msg",
+  "md",
+  "txt",
+  "epub",
+  "mobi",
+  "azw3"
+];
 const SUPPORTED_EXTENSIONS = new Set(SUPPORTED_EXTENSION_LIST);
 const EBOOK_EXTENSIONS = new Set(["epub", "mobi", "azw3"]);
-const SUPPORTED_FILE_TYPES_LABEL = "Word、Excel、PDF、PPT、Markdown、TXT、EPUB、MOBI、AZW3";
-const SUPPORTED_FILE_EXTENSIONS_LABEL = "doc/docx/xls/xlsx/pdf/pptx/md/txt/epub/mobi/azw3";
+const SPREADSHEET_EXTENSIONS = new Set(["xls", "xlsx", "ods", "csv"]);
+const OFFICE_MEDIA_EXTENSIONS = new Set(["doc", "docx", "docm", "ppt", "pptx", "pptm", "xlsx"]);
+const MARKITDOWN_DOCUMENT_EXTENSIONS = new Set(["docx", "docm", "rtf", "odt", "ppt", "pptx", "pptm", "odp"]);
+const DATA_AND_ARCHIVE_EXTENSIONS = new Set(["csv", "json", "xml", "html", "htm", "ipynb", "zip", "eml", "msg"]);
+const SUPPORTED_FILE_TYPES_LABEL = "Word、Excel、PDF、PPT、网页、数据、邮件、压缩包、Markdown、TXT、EPUB、MOBI、AZW3";
+const SUPPORTED_FILE_EXTENSIONS_LABEL = "doc/docx/docm/rtf/odt/xls/xlsx/ods/csv/json/xml/pdf/ppt/pptx/pptm/odp/html/htm/ipynb/zip/eml/msg/md/txt/epub/mobi/azw3";
 const SUPPORTED_FILE_INPUT_ACCEPT = SUPPORTED_EXTENSION_LIST.map((extension) => `.${extension}`).join(",");
-const DISCOVERABLE_FALLBACK_EXTENSIONS = new Set(["csv", "rtf", "html", "htm", "odt", "ods", "odp", "ppt", "pptm", "docm"]);
+const DISCOVERABLE_FALLBACK_EXTENSIONS = new Set([]);
 const INTERNAL_ROOT_DIR = ".openclaw";
 const INTERNAL_SOURCE_DIR = `${INTERNAL_ROOT_DIR}/source-files`;
 const INTERNAL_RECORDS_DIR = `${INTERNAL_ROOT_DIR}/import-records`;
@@ -34,7 +66,7 @@ const INTERNAL_ACTIVITY_EVENTS_DIR = `${INTERNAL_ACTIVITY_DIR}/events`;
 const INTERNAL_ACTIVITY_STORE_PATH = `${INTERNAL_ACTIVITY_DIR}/activity-store.json`;
 const ACTIVITY_BUS_EVENT = "openclaw:file-activity";
 const ACTIVITY_STORE_VERSION = 1;
-const TRACKED_ACTIVITY_EXTENSIONS = new Set(["md", "pdf", "doc", "docx", "pptx", "xls", "xlsx", "epub", "mobi", "azw3"]);
+const TRACKED_ACTIVITY_EXTENSIONS = new Set(["md", "pdf", "doc", "docx", "docm", "rtf", "odt", "ppt", "pptx", "pptm", "odp", "xls", "xlsx", "ods", "csv", "json", "xml", "html", "htm", "ipynb", "zip", "eml", "msg", "epub", "mobi", "azw3"]);
 const IGNORED_ACTIVITY_PATH_PATTERNS = [
   /^\.openclaw(\/|$)/i,
   /^\.obsidian(\/|$)/i,
@@ -46,6 +78,7 @@ const DEFAULT_SETTINGS = {
   converterPath: "",
   outputDir: "Inbox",
   keepOriginal: true,
+  enableMarkitdownPlugins: false,
   enableAiSuggestions: true,
   recentDownloadsLookbackMinutes: 120,
   confirmBeforeDelete: true,
@@ -60,7 +93,7 @@ const DEFAULT_SETTINGS = {
 
 const LOCAL_DEPENDENCY_REQUIREMENTS = {
   required: [
-    "markitdown：导入 docx、pdf、pptx、xlsx、xls 等需要先转换成 Markdown 的文件时必需，也可处理部分电子书格式。"
+    "markitdown：导入 docx、pdf、pptx、xlsx、xls、网页、数据、邮件、压缩包等需要先转换成 Markdown 的文件时必需，也可处理部分电子书格式。"
   ],
   optional: [
     "python3：PDF OCR 备用链路依赖。",
@@ -72,6 +105,7 @@ const LOCAL_DEPENDENCY_REQUIREMENTS = {
   ],
   notes: [
     "md、txt 可直接导入，不依赖上述转换工具。",
+    "MarkItDown 插件能力默认关闭；只有在设置中明确开启后才会传入 --use-plugins。",
     "缺少可选依赖时，只有对应格式或 OCR 能力会受影响。"
   ]
 };
@@ -210,6 +244,9 @@ function summarizeImportErrorForNotice(errorOrMessage, extension, fallback = "�
   }
   if (/timeout|timed out|超时/i.test(message)) {
     return "处理超时，请稍后重试或换用较小文件。";
+  }
+  if (/markitdown|no converter|unsupported|not supported|format|converter|--use-plugins|plugin/i.test(message)) {
+    return `${String(extension || "文件").toUpperCase()} 转换失败，请检查 markitdown、可选依赖或插件设置后重试。`;
   }
   return message.length > maxLength ? `${message.slice(0, maxLength - 1)}…` : message;
 }
@@ -3534,8 +3571,21 @@ module.exports = class SmartImportPlugin extends Plugin {
     return result;
   }
 
+  getMarkitdownConverterName() {
+    return this.settings && this.settings.enableMarkitdownPlugins ? "markitdown+plugins" : "markitdown";
+  }
+
+  getMarkitdownArgs(sourcePath, outputPath) {
+    const args = [];
+    if (this.settings && this.settings.enableMarkitdownPlugins) {
+      args.push("--use-plugins");
+    }
+    args.push(sourcePath, "-o", outputPath);
+    return args;
+  }
+
   async convertWithMarkitdown(command, sourcePath, outputPath) {
-    await execFileAsync(command, [sourcePath, "-o", outputPath]);
+    await execFileAsync(command, this.getMarkitdownArgs(sourcePath, outputPath));
     return fs.readFile(outputPath, "utf8");
   }
 
@@ -3549,7 +3599,7 @@ module.exports = class SmartImportPlugin extends Plugin {
       try {
         return {
           content: await this.convertWithMarkitdown(environment.markitdownCommand, sourcePath, markdownPath),
-          converterName: "markitdown"
+          converterName: this.getMarkitdownConverterName()
         };
       } catch (error) {
         errors.push(`markitdown: ${(error.stderr || error.message || error).toString().trim()}`);
@@ -3581,6 +3631,53 @@ module.exports = class SmartImportPlugin extends Plugin {
     }
 
     throw new Error(errors.filter(Boolean).join("\n") || `${normalizedExtension.toUpperCase()} 电子书转换失败。`);
+  }
+
+  async convertSourceToMarkdown(sourcePath, options = {}) {
+    const extension = String(options.extension || path.extname(sourcePath).slice(1)).toLowerCase();
+    const tempDir = options.tempDir;
+    const environment = options.environment || await this.checkConversionEnvironment(extension, true);
+    const tempMarkdownPath = options.tempMarkdownPath || path.join(tempDir || os.tmpdir(), `${slugify(path.basename(sourcePath, path.extname(sourcePath))) || "import"}.md`);
+    const isDirectMarkdown = extension === "md";
+    const isDirectText = extension === "txt";
+    const isLegacyWord = extension === "doc";
+    const isEbook = EBOOK_EXTENSIONS.has(extension);
+    let conversionSourcePath = sourcePath;
+    let converterName = isDirectMarkdown || isDirectText
+      ? "direct-copy"
+      : isLegacyWord
+        ? `libreoffice+${this.getMarkitdownConverterName()}`
+        : this.getMarkitdownConverterName();
+
+    if (isDirectMarkdown || isDirectText) {
+      return {
+        content: await fs.readFile(sourcePath, "utf8"),
+        converterName,
+        conversionSourcePath
+      };
+    }
+
+    if (isLegacyWord) {
+      if (!tempDir) {
+        throw new Error("导入 .doc 需要临时目录以便通过 LibreOffice 转换为 .docx。");
+      }
+      conversionSourcePath = await convertLegacyWordToDocx(sourcePath, tempDir);
+    }
+
+    if (isEbook) {
+      const ebookResult = await this.convertEbookToMarkdown(conversionSourcePath, extension, tempDir, environment);
+      return {
+        content: ebookResult.content,
+        converterName: ebookResult.converterName,
+        conversionSourcePath
+      };
+    }
+
+    return {
+      content: await this.convertWithMarkitdown(environment.command, conversionSourcePath, tempMarkdownPath),
+      converterName,
+      conversionSourcePath
+    };
   }
 
   async buildDependencyInstallPlan(force = false) {
@@ -5753,10 +5850,10 @@ module.exports = class SmartImportPlugin extends Plugin {
         : isDirectMarkdown || isDirectText
           ? "direct-copy"
           : isLegacyWord
-            ? "libreoffice+markitdown"
+            ? `libreoffice+${this.getMarkitdownConverterName()}`
             : isEbook
               ? "ebook"
-              : "markitdown",
+              : this.getMarkitdownConverterName(),
       converterVersion: environment.version,
       warning: "",
       previewText: "",
@@ -5811,7 +5908,7 @@ module.exports = class SmartImportPlugin extends Plugin {
           outputAssetsPath: "",
           importRecordPath,
           warning: unsupportedWarning,
-          manualNextStep: "建议先转换为 docx、pdf、pptx、xlsx、md、txt、epub、mobi 或 azw3 后再重试导入。",
+          manualNextStep: `建议先转换为 ${SUPPORTED_FILE_EXTENSIONS_LABEL} 中的一种格式后再重试导入。`,
           content: ""
         });
         const file = await this.app.vault.create(outputNotePath, markdown);
@@ -5868,21 +5965,15 @@ module.exports = class SmartImportPlugin extends Plugin {
         };
       }
 
-      if (isLegacyWord) {
-        conversionSourcePath = await convertLegacyWordToDocx(sourcePath, tempDir);
-      }
-
-      let actualConverterName = isDirectMarkdown || isDirectText ? "direct-copy" : isLegacyWord ? "libreoffice+markitdown" : "markitdown";
-      let convertedContent = "";
-      if (isDirectMarkdown || isDirectText) {
-        convertedContent = await fs.readFile(sourcePath, "utf8");
-      } else if (isEbook) {
-        const ebookResult = await this.convertEbookToMarkdown(conversionSourcePath, extension, tempDir, environment);
-        convertedContent = ebookResult.content;
-        actualConverterName = ebookResult.converterName;
-      } else {
-        convertedContent = await this.convertWithMarkitdown(environment.command, conversionSourcePath, tempMarkdownPath);
-      }
+      const conversionResult = await this.convertSourceToMarkdown(sourcePath, {
+        extension,
+        tempDir,
+        tempMarkdownPath,
+        environment
+      });
+      conversionSourcePath = conversionResult.conversionSourcePath || sourcePath;
+      let actualConverterName = conversionResult.converterName;
+      let convertedContent = conversionResult.content;
       let importStatus = "imported_to_inbox";
       let warning = "";
       let manualNextStep = "";
@@ -5893,11 +5984,11 @@ module.exports = class SmartImportPlugin extends Plugin {
         importStatus = pdfResult.status;
         warning = pdfResult.warning;
         manualNextStep = pdfResult.manualNextStep;
-      } else if (extension === "xls" || extension === "xlsx") {
+      } else if (SPREADSHEET_EXTENSIONS.has(extension)) {
         convertedContent = cleanSpreadsheetMarkdown(convertedContent);
       }
 
-      if (["docx", "pptx", "xlsx", "doc"].includes(extension)) {
+      if (OFFICE_MEDIA_EXTENSIONS.has(extension)) {
         const assetSlug = slugify(title) || `import-${createJobId()}`;
         const candidateOutputAssetsPath = await getUniqueVaultPath(this.app, `${assetsRoot}/${assetSlug}`, {
           separator: " "
@@ -5994,6 +6085,7 @@ module.exports = class SmartImportPlugin extends Plugin {
     } catch (error) {
       console.error("Smart import failed", error);
       const detail = (error.stderr || error.message || "Unknown error").trim();
+      const failedConverterName = isDirectMarkdown || isDirectText ? "direct-copy" : isLegacyWord ? `libreoffice+${this.getMarkitdownConverterName()}` : isEbook ? "ebook" : this.getMarkitdownConverterName();
       const markdown = buildMarkdownDocument({
         title: cleanedTitle,
         sourceFileName: fileName,
@@ -6002,13 +6094,15 @@ module.exports = class SmartImportPlugin extends Plugin {
         sourceFileStoredPath: originalFile,
         importedAt,
         importMethod,
-        converterName: isDirectMarkdown || isDirectText ? "direct-copy" : isLegacyWord ? "libreoffice+markitdown" : isEbook ? "ebook" : "markitdown",
+        converterName: failedConverterName,
         status: "failed",
         outputNotePath,
         outputAssetsPath: "",
         importRecordPath,
         warning: isDirectMarkdown || isDirectText ? `Import failed: ${detail}` : `Conversion failed: ${detail}`,
-        manualNextStep: "请检查依赖环境、原文件可读性，或稍后通过“重试”再次导入。",
+        manualNextStep: DATA_AND_ARCHIVE_EXTENSIONS.has(extension) || MARKITDOWN_DOCUMENT_EXTENSIONS.has(extension)
+          ? "请确认 markitdown 已安装且当前格式对应的可选依赖可用；如启用了插件，请只处理可信来源文件后再重试。"
+          : "请检查依赖环境、原文件可读性，或稍后通过“重试”再次导入。",
         content: ""
       });
 
@@ -6037,7 +6131,7 @@ module.exports = class SmartImportPlugin extends Plugin {
         source_type: extension,
         imported_at: importedAt,
         import_method: importMethod,
-        converter_name: isDirectMarkdown || isDirectText ? "direct-copy" : isLegacyWord ? "libreoffice+markitdown" : isEbook ? "ebook" : "markitdown",
+        converter_name: failedConverterName,
         converter_version: environment.version,
         warning: detail,
         preview_text: "",
@@ -7559,9 +7653,9 @@ class SmartImportSettingTab extends PluginSettingTab {
         ? (
           environment.optionalDependencies && environment.optionalDependencies.length
             ? `可选依赖缺失：${environment.optionalDependencies.join("、")}`
-            : "可选依赖已就绪。"
+            : `可选依赖已就绪。MarkItDown 插件：${this.plugin.settings.enableMarkitdownPlugins ? "已开启" : "已关闭"}。`
         )
-        : "缺少必需依赖时，docx / pdf / pptx / xlsx / xls / doc 等需要转换的文件将无法导入。"
+        : "缺少必需依赖时，docx / pdf / pptx / xlsx / xls / doc / html / csv / json / zip 等需要转换的文件将无法导入。"
     });
   }
 
@@ -7653,6 +7747,19 @@ class SmartImportSettingTab extends PluginSettingTab {
             this.plugin.settings.converterPath = value.trim();
             await this.plugin.saveSettings();
           })
+      );
+
+    new Setting(containerEl)
+      .setName("启用 MarkItDown 插件")
+      .setDesc("默认关闭。开启后转换时会传入 --use-plugins，可获得第三方插件扩展能力；只建议处理可信来源文件。")
+      .addToggle((toggle) =>
+        toggle.setValue(Boolean(this.plugin.settings.enableMarkitdownPlugins)).onChange(async (value) => {
+          this.plugin.settings.enableMarkitdownPlugins = value;
+          this.plugin.environmentStatus = null;
+          this.plugin.ebookEnvironmentStatus = null;
+          await this.plugin.saveSettings();
+          this.display();
+        })
       );
 
     new Setting(containerEl)

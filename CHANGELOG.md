@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.6
+
+- expanded Smart Import support for Office variants, OpenDocument files, web/data formats, Jupyter notebooks, ZIP archives, and email files
+- added an opt-in MarkItDown plugin setting that passes `--use-plugins` only when explicitly enabled
+- centralized conversion through `convertSourceToMarkdown` so format-specific fallbacks are easier to maintain
+- added 0.2.6 acceptance evidence covering 16 converted formats with mock-vault E2E verification
+
 ## 0.2.5
 
 - added EPUB, MOBI, and AZW3 to file picker, drag-and-drop, clipboard, recent downloads, and activity stream handling

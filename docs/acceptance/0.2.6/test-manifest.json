@@ -1,0 +1,147 @@
+{
+  "plugin_version": "0.2.6",
+  "sentinel": "SMART_IMPORT_026_SENTINEL",
+  "dependencies": {
+    "markitdown": "/Users/xuziming/.local/bin/markitdown",
+    "pandoc": "/opt/homebrew/bin/pandoc",
+    "ebook-convert": "/opt/homebrew/bin/ebook-convert"
+  },
+  "results": [
+    {
+      "file": "smart-import-026-azw3.azw3",
+      "format": "azw3",
+      "status": "pass",
+      "converter": "ebook-convert",
+      "sentinel_found": true,
+      "detail": "1% Converting input to HTML...\nInputFormatPlugin: MOBI Input running\non /Users/xuziming/Documents/Codex/日常/对话/施工队/Obsitian/output/smart-import-0.2.6-acceptance/fixtures/smart-import-026-azw3.azw3\nFound KF8 MOBI of type 'standalone'\nKF8 has no metadata Table of Contents\nParsing all content...\n34% Running transforms on e-book...\nMerging user specified metadata...\nDetecting structure...\nFlattening CSS and remapping font sizes...\nSource base font size is 12.00000pt\nRemoving fake margins...\nCleaning "
+    },
+    {
+      "file": "smart-import-026-csv.csv",
+      "format": "csv",
+      "status": "pass",
+      "converter": "markitdown",
+      "sentinel_found": true,
+      "detail": ""
+    },
+    {
+      "file": "smart-import-026-docx.docx",
+      "format": "docx",
+      "status": "pass",
+      "converter": "markitdown",
+      "sentinel_found": true,
+      "detail": ""
+    },
+    {
+      "file": "smart-import-026-eml.eml",
+      "format": "eml",
+      "status": "pass",
+      "converter": "markitdown",
+      "sentinel_found": true,
+      "detail": ""
+    },
+    {
+      "file": "smart-import-026-epub.epub",
+      "format": "epub",
+      "status": "pass",
+      "converter": "pandoc",
+      "sentinel_found": true,
+      "detail": ""
+    },
+    {
+      "file": "smart-import-026-html.html",
+      "format": "html",
+      "status": "pass",
+      "converter": "markitdown",
+      "sentinel_found": true,
+      "detail": ""
+    },
+    {
+      "file": "smart-import-026-ipynb.ipynb",
+      "format": "ipynb",
+      "status": "pass",
+      "converter": "markitdown",
+      "sentinel_found": true,
+      "detail": ""
+    },
+    {
+      "file": "smart-import-026-json.json",
+      "format": "json",
+      "status": "pass",
+      "converter": "markitdown",
+      "sentinel_found": true,
+      "detail": ""
+    },
+    {
+      "file": "smart-import-026-md.md",
+      "format": "md",
+      "status": "pass",
+      "converter": "direct-copy",
+      "sentinel_found": true,
+      "detail": ""
+    },
+    {
+      "file": "smart-import-026-mobi.mobi",
+      "format": "mobi",
+      "status": "pass",
+      "converter": "ebook-convert",
+      "sentinel_found": true,
+      "detail": "1% Converting input to HTML...\nInputFormatPlugin: MOBI Input running\non /Users/xuziming/Documents/Codex/日常/对话/施工队/Obsitian/output/smart-import-0.2.6-acceptance/fixtures/smart-import-026-mobi.mobi\nParsing all content...\nForcing index.html into XHTML namespace\nGenerating default TOC from spine...\n34% Running transforms on e-book...\nMerging user specified metadata...\nDetecting structure...\nAuto generated TOC with 0 entries.\nFlattening CSS and remapping font sizes...\nSource base font size is 12.0000"
+    },
+    {
+      "file": "smart-import-026-pdf.pdf",
+      "format": "pdf",
+      "status": "pass",
+      "converter": "markitdown",
+      "sentinel_found": true,
+      "detail": ""
+    },
+    {
+      "file": "smart-import-026-pptx.pptx",
+      "format": "pptx",
+      "status": "pass",
+      "converter": "markitdown",
+      "sentinel_found": true,
+      "detail": ""
+    },
+    {
+      "file": "smart-import-026-txt.txt",
+      "format": "txt",
+      "status": "pass",
+      "converter": "direct-copy",
+      "sentinel_found": true,
+      "detail": ""
+    },
+    {
+      "file": "smart-import-026-xlsx.xlsx",
+      "format": "xlsx",
+      "status": "pass",
+      "converter": "markitdown",
+      "sentinel_found": true,
+      "detail": ""
+    },
+    {
+      "file": "smart-import-026-xml.xml",
+      "format": "xml",
+      "status": "pass",
+      "converter": "markitdown",
+      "sentinel_found": true,
+      "detail": ""
+    },
+    {
+      "file": "smart-import-026-zip.zip",
+      "format": "zip",
+      "status": "pass",
+      "converter": "markitdown",
+      "sentinel_found": true,
+      "detail": ""
+    },
+    {
+      "file": "external-msg-required.msg",
+      "format": "msg",
+      "status": "manual",
+      "converter": "markitdown",
+      "sentinel_found": false,
+      "detail": "Use a real Outlook .msg sample for UI acceptance; plain-text fixtures cannot represent MSG binary structure."
+    }
+  ]
+}

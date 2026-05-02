@@ -16,6 +16,7 @@ The build step copies these sources into release-ready root files.
 - imports files and folders from outside the vault
 - supports file picker, drag-and-drop, recent downloads, Finder selection, clipboard, and natural-language lookup flows
 - converts supported documents into Markdown notes with import frontmatter
+- supports Office, PDF, web, data, notebook, archive, email, Markdown, TXT, and ebook imports
 - supports EPUB, MOBI, and AZW3 ebook imports through markitdown, pandoc, or Calibre fallbacks
 - preserves original source files inside the vault when enabled
 - generates partial stub notes for low-quality PDFs and unsupported files instead of failing silently
@@ -43,6 +44,15 @@ The current codebase contains macOS-specific helpers such as `mdfind` and `osasc
 Required for general conversion:
 
 - `markitdown`
+
+Common converted formats:
+
+- `doc`, `docx`, `docm`, `rtf`, `odt`
+- `xls`, `xlsx`, `ods`, `csv`
+- `pdf`
+- `ppt`, `pptx`, `pptm`, `odp`
+- `html`, `htm`, `json`, `xml`, `ipynb`, `zip`, `eml`, `msg`
+- `epub`, `mobi`, `azw3`
 
 Optional but recommended:
 
@@ -119,8 +129,16 @@ Then enable `Smart Import` in Community Plugins.
 First launch is non-blocking:
 
 - `md` and `txt` imports work immediately
-- if you later import `docx`, `pdf`, `pptx`, `xlsx`, `xls`, `doc`, `epub`, `mobi`, or `azw3` without the needed converter, Smart Import will open the dependency install wizard for you
+- if you later import converted formats such as `docx`, `pdf`, `pptx`, `xlsx`, `csv`, `html`, `epub`, `mobi`, or `azw3` without the needed converter, Smart Import will open the dependency install wizard for you
 - on macOS, the wizard can open Terminal and run the recommended install commands after you confirm
+
+## Acceptance evidence
+
+The 0.2.6 acceptance package is tracked in [`docs/acceptance/0.2.6`](./docs/acceptance/0.2.6/):
+
+- conversion smoke tests: 16 passed, 0 failed
+- Smart Import mock-vault E2E: 16 passed, 0 failed, 16 activity cards
+- remaining manual item: real Outlook `.msg` sample validation
 
 ## Manual install into Obsidian
 

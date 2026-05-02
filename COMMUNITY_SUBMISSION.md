@@ -7,8 +7,8 @@ This file collects the exact metadata needed to submit `Smart Import` to the Obs
 - repo: `0126-hash/obsidian-smart-import`
 - branch: `main`
 - manifest path: `/manifest.json`
-- latest public release: `0.2.3`
-- latest release URL: `https://github.com/0126-hash/obsidian-smart-import/releases/tag/0.2.3`
+- latest public release: `0.2.6`
+- latest release URL: `https://github.com/0126-hash/obsidian-smart-import/releases/tag/0.2.6`
 
 ## Community directory entry
 
@@ -37,8 +37,9 @@ This repo also publishes a zip for manual installation, but Community Plugins on
 - desktop-only plugin
 - best-tested on macOS
 - external dependency required for general conversion: `markitdown`
-- optional dependencies for OCR and legacy office formats: `python3`, `tesseract`, `pypdfium2`, `LibreOffice`
+- optional dependencies for OCR, legacy office, and ebook fallback formats: `python3`, `tesseract`, `pypdfium2`, `LibreOffice`, `pandoc`, `Calibre / ebook-convert`
 - OCR helper is generated on demand by the plugin, so Community Plugin installation does not need a separate script asset
+- 0.2.6 acceptance evidence is available in `docs/acceptance/0.2.6/`
 
 ## Pre-submit checklist
 
